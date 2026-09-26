@@ -24,6 +24,9 @@ export function contextChars(messages: AgentMessage[]): number {
 export const conversation = (messages: AgentMessage[]) =>
   messages.filter((m) => m.role !== 'system');
 
+/** A page state printed by ultrafast's bu.state(). */
+const STATE = /\[state\] [\s\S]*?\n\[\/state\]/g;
+
 /** A provider projection; the original transcript remains available for accounting and audit. */
 export class RunContext {
   private covered = 0;
@@ -46,11 +49,29 @@ export class RunContext {
       (m) => m.role === 'toolResult' && m.content.some((c) => c.type === 'image'),
     );
     const keep = new Set(images.slice(-2));
+    // Only the newest ultrafast page state stays: older ones are stale and would be paid for on every call.
+    let states = projected
+      .flatMap((m) => (m.role === 'toolResult' ? m.content : []))
+      .reduce((n, c) => n + (c.type === 'text' ? (c.text.match(STATE)?.length ?? 0) : 0), 0);
     return [
       ...messages.filter((m) => m.role === 'system'),
       ...projected.map((m) =>
-        m.role === 'toolResult' && !keep.has(m)
-          ? { ...m, content: m.content.filter((c) => c.type !== 'image') }
+        m.role === 'toolResult'
+          ? {
+              ...m,
+              content: m.content
+                .filter((c) => c.type !== 'image' || keep.has(m))
+                .map((c) =>
+                  c.type === 'text'
+                    ? {
+                        ...c,
+                        text: c.text.replace(STATE, (s) =>
+                          --states ? '[state replaced by a newer one]' : s,
+                        ),
+                      }
+                    : c,
+                ),
+            }
           : m,
       ),
     ];

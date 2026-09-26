@@ -3,7 +3,9 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { axNodes, type AXNode, type Page } from './page.js';
 import type { CDP } from './cdp.js';
+import type { Protocol } from 'devtools-protocol';
 
+type AX = Protocol.Accessibility.AXNode;
 type Target = number | string | { name: string; role?: string };
 type Op = 'click' | 'fill' | 'select' | 'check';
 type RawAX = {
@@ -73,6 +75,30 @@ const CONTROLS = new Set([
   'option',
   'slider',
 ]);
+/** bu.state() prints these, and any other focusable node, as `[id] role "name"` lines. */
+const STATE_ROLES = new Set([...CONTROLS, 'treeitem']);
+/** Text inside these continues the current state line (a table row is one line); any other role starts a new one. */
+const INLINE = new Set([
+  'generic',
+  'strong',
+  'emphasis',
+  'mark',
+  'code',
+  'time',
+  'subscript',
+  'superscript',
+  'cell',
+  'gridcell',
+  'columnheader',
+  'rowheader',
+]);
+const STATES: Record<string, Record<string, string>> = {
+  checked: { true: 'checked', false: 'unchecked', mixed: 'mixed' },
+  expanded: { true: 'expanded', false: 'collapsed' },
+  selected: { true: 'selected' },
+  disabled: { true: 'disabled' },
+  focused: { true: 'focused' },
+};
 const KEYS: Record<string, { code: string; key: string; keyCode: number; text?: string }> = {
   Enter: { code: 'Enter', key: 'Enter', keyCode: 13, text: '\r' },
   Tab: { code: 'Tab', key: 'Tab', keyCode: 9 },
@@ -100,6 +126,22 @@ const isContextLoss = (e: unknown) =>
   /Execution context was destroyed|Cannot find context|Cannot find default execution context|Inspected target navigated|Target closed|No frame/.test(
     String(e instanceof Error ? e.message : e),
   );
+/** A focusable contenteditable element is a text field that Chrome reports as generic. */
+const editable = (n: RawAX) =>
+  n.role?.value === 'generic' &&
+  !!n.properties?.some((p) => p.name === 'editable') &&
+  !!n.properties.some((p) => p.name === 'focusable' && p.value.value);
+/** Navigation briefly destroys the page's context: retry for about a second, then give up. */
+async function retry<T>(fn: () => Promise<T>) {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (i >= 20 || !isContextLoss(error)) throw error;
+      await delay(50);
+    }
+  }
+}
 
 type SerpRow = { title: string; url: string; snippet: string };
 /** Rows from the search endpoint's text: blocks of Title/URL/Published/Highlights separated by ---. */
@@ -135,7 +177,7 @@ Fast browser helpers: the global \`bu\` in the javascript REPL. Prefer them; raw
 - Autocomplete fields: await bu.fill(t, 'Berl', {pick: 'Berlin, Germany'}) types, waits for suggestions and clicks that one. Always pass {pick} on autocomplete fields; never {enter:true} there.
 - If an interaction fails, try one different route (another control, ids from bu.find, the keyboard) before reporting that you are blocked.
 - JavaScript alert/confirm/prompt dialogs are accepted automatically; their text is printed as [dialog ...] after the action.
-- Look: await bu.state() -> {url,title,controls:[{id,role,name,value}],text}; await bu.find('word') -> matching controls with ids. Read: await bu.read(region?) -> text lines (headings, [link](url), list items); await bu.table(i?) -> rows keyed by column headers.
+- Look: await bu.state() prints the page as one list in page order: [id] role "name" = value with its states (select options inline), ## headings and the visible text in place; *[id] = new since the previous state. Long pages are cut at about 8000 characters: bu.state({max: 30000}) prints more. await bu.find('word') -> matching controls with ids. Read: await bu.read(region?) -> text lines (headings, [link](url), list items); await bu.table(i?) -> rows keyed by column headers.
 - Never write blind sleeps (setTimeout, sleep) to wait for pages; actions already settle. For a specific condition use await bu.waitForText('Results').
 - Actions return as soon as the page is briefly quiet, often before slow results arrive; bu.state() waits up to 3 s for the page. If results are still missing or say loading, wait for them with await bu.waitForText('…') before concluding.
 - Deliver data you already extracted with finish_from_js({expression: 'rows'}) instead of retyping it. Take a screenshot only when the page's text did not give you what you need.
@@ -229,6 +271,7 @@ export class AxHelpers {
     const start = Date.now();
     const session = await this.trackNetwork(page).catch(() => undefined);
     let limit = cap;
+    let pending = 0;
     while (Date.now() - start < limit) {
       try {
         const probe = await page.evaluate(() => {
@@ -248,7 +291,7 @@ export class AxHelpers {
         const now = Date.now();
         if (probe.ready === 'loading') limit = Math.max(cap, 3000); // navigations need longer than in-page updates
         probe.idle = Math.min(probe.idle, now - start); // quiet must be observed after this action began
-        const pending = session
+        pending = session
           ? [...(this.inflight.get(session)?.values() ?? [])].filter((t) => now - t < 1500).length
           : 0;
         const netIdle = session ? now - (this.lastNet.get(session) ?? 0) : quiet;
@@ -261,7 +304,7 @@ export class AxHelpers {
       }
       await delay(40);
     }
-    return { why: 'cap', ready: 'unknown', ms: Date.now() - start };
+    return { why: 'cap', ready: 'unknown', ms: Date.now() - start, pending };
   }
 
   private flushDialogs() {
@@ -270,58 +313,43 @@ export class AxHelpers {
 
   /** Duration of the last full AX snapshot; the worker skips its automatic state print on slow pages. */
   snapshotMs = 0;
-  private async nodes(page = this.page()) {
-    for (let i = 0; ; i++) {
-      try {
-        const started = Date.now();
-        const [{ nodes: top }, info, { frameTree }] = await Promise.all([
-          page.cdp('Accessibility.getFullAXTree'),
-          page.info(),
-          page.cdp('Page.getFrameTree'),
-        ]);
-        // A form that lives in a same-origin iframe is missing from the main frame's AX tree. Only a page without its
-        // own fields gets the frames' trees, and only frames that hold fields: ads and embeds would bloat every state.
-        const frames: string[] = [];
-        const walk = (tree: typeof frameTree) =>
-          tree.childFrames?.forEach((child) => {
-            if (child.frame.securityOrigin === frameTree.frame.securityOrigin)
-              frames.push(child.frame.id);
-            walk(child);
-          });
-        if (!top.some((n) => ROLES.fill.has(String(n.role?.value)))) walk(frameTree);
-        const inner = await Promise.all(
-          frames.map((frameId) =>
-            page.cdp('Accessibility.getFullAXTree', { frameId }).then(
-              (r) => r.nodes,
-              () => [],
-            ),
+  private nodes(page = this.page()) {
+    return retry(async () => {
+      const started = Date.now();
+      const [{ nodes: top }, info, { frameTree }] = await Promise.all([
+        page.cdp('Accessibility.getFullAXTree'),
+        page.info(),
+        page.cdp('Page.getFrameTree'),
+      ]);
+      // A form that lives in a same-origin iframe is missing from the main frame's AX tree. Only a page without its
+      // own fields gets the frames' trees, and only frames that hold fields: ads and embeds would bloat every lookup.
+      const frames: string[] = [];
+      const walk = (tree: typeof frameTree) =>
+        tree.childFrames?.forEach((child) => {
+          if (child.frame.securityOrigin === frameTree.frame.securityOrigin)
+            frames.push(child.frame.id);
+          walk(child);
+        });
+      if (!top.some((n) => ROLES.fill.has(String(n.role?.value)))) walk(frameTree);
+      const inner = await Promise.all(
+        frames.map((frameId) =>
+          page.cdp('Accessibility.getFullAXTree', { frameId }).then(
+            (r) => r.nodes,
+            () => [],
           ),
-        );
-        const nodes = [
-          ...top,
-          ...inner.filter((f) => f.some((n) => ROLES.fill.has(String(n.role?.value)))).flat(),
-        ];
-        this.snapshotMs = Date.now() - started;
-        // A focusable contenteditable element is a text field that Chrome reports as generic.
-        const editable = new Set(
-          nodes
-            .filter(
-              (n) =>
-                n.role?.value === 'generic' &&
-                n.properties?.some((p) => p.name === 'editable') &&
-                n.properties.some((p) => p.name === 'focusable' && p.value.value),
-            )
-            .map((n) => n.backendDOMNodeId),
-        );
-        return {
-          ...info,
-          nodes: axNodes(nodes).map((n) => (editable.has(n.id) ? { ...n, role: 'textbox' } : n)),
-        };
-      } catch (error) {
-        if (i >= 20 || !isContextLoss(error)) throw error;
-        await delay(50);
-      }
-    }
+        ),
+      );
+      const nodes = [
+        ...top,
+        ...inner.filter((f) => f.some((n) => ROLES.fill.has(String(n.role?.value)))).flat(),
+      ];
+      this.snapshotMs = Date.now() - started;
+      const edit = new Set(nodes.filter(editable).map((n) => n.backendDOMNodeId));
+      return {
+        ...info,
+        nodes: axNodes(nodes).map((n) => (edit.has(n.id) ? { ...n, role: 'textbox' } : n)),
+      };
+    });
   }
 
   /**
@@ -356,54 +384,122 @@ export class AxHelpers {
     });
   }
 
-  /** Compact state: URL, title, interactive controls (ids usable as targets), visible text summary. */
-  async state(options: { max?: number; text?: number } = {}) {
-    this.dirty = false; // a look after the last action replaces the automatic state print
-    await this.settle({ capMs: 3000 }); // actions return early; what the model reads should be the settled page
-    const [snap, visible] = await Promise.all([
-      this.nodes(),
-      this.visibleText().catch(() => undefined),
+  /** AX trees of the main frame and of every child frame in its process; other processes' frames fail and are skipped. */
+  private async frames(page: Page) {
+    const [{ nodes }, { frameTree }] = await Promise.all([
+      page.cdp('Accessibility.getFullAXTree'),
+      page.cdp('Page.getFrameTree'),
     ]);
-    const all = snap.nodes.filter(
-      (n) => CONTROLS.has(n.role) && (n.name || n.value !== undefined || n.role !== 'link'),
+    const children: { id: string; url: string }[] = [];
+    const walk = (tree: typeof frameTree) =>
+      tree.childFrames?.forEach((child) => (children.push(child.frame), walk(child)));
+    walk(frameTree);
+    const inner = await Promise.all(
+      children.map((f) =>
+        page.cdp('Accessibility.getFullAXTree', { frameId: f.id }).then(
+          (r) => [{ url: f.url, nodes: r.nodes }],
+          () => [],
+        ),
+      ),
     );
-    const seen = new Set<string>();
-    // Fields and open menus first, the rest in page order: page chrome must not push the form past the cutoff.
-    const rank = (n: AXNode) =>
-      ROLES.fill.has(n.role) || n.expanded || n.role === 'option' ? 0 : 1;
-    const controls = all
-      .filter((n) => {
-        if (!n.name && ROLES.fill.has(n.role)) return true; // unlabeled fields are distinct fields, not repeats
-        const key = `${n.role}|${n.name}|${n.value ?? ''}`;
-        return seen.has(key) ? false : (seen.add(key), true);
-      })
-      .map((n, i) => ({ n, i }))
-      .sort((a, b) => rank(a.n) - rank(b.n) || a.i - b.i)
-      .map(({ n }) => n);
-    const max = options.max ?? 60;
-    const textParts: string[] = [];
-    let size = 0;
-    const limit = options.text ?? 1200;
-    for (const n of snap.nodes) {
-      if (!(n.role === 'heading' || n.role === 'StaticText') || !n.name) continue;
-      if (visible !== undefined && !visible.includes(n.name.toLowerCase())) continue;
-      const part = n.role === 'heading' ? `## ${n.name}` : n.name;
-      if (textParts.at(-1) === part) continue;
-      textParts.push(part);
-      size += part.length + 1;
-      if (size > limit) break;
+    return [{ url: '', nodes }, ...inner.flat()];
+  }
+
+  /** Ids in the previous state print, to mark new ones with `*`; child-frame nodes are kept as targets. */
+  private shown = new Map<number, AXNode | undefined>();
+
+  /** One list in page order: `[id] role "name" = value states`, `## heading` and visible text in place. */
+  async state(options: { max?: number } = {}) {
+    this.dirty = false; // a look after the last action replaces the automatic state print
+    const settled = await this.settle({ capMs: 3000 }); // actions return early; read the settled page
+    const page = this.page();
+    const started = Date.now();
+    const [[frames, info], visible, targets] = await Promise.all([
+      retry(() => Promise.all([this.frames(page), page.info()])),
+      this.visibleText(page).catch(() => undefined),
+      this.browser()
+        .send('Target.getTargets')
+        .catch(() => ({ targetInfos: [] })),
+    ]);
+    this.snapshotMs = Date.now() - started;
+    const previous = this.shown;
+    this.shown = new Map();
+    const lines: string[] = [];
+    let text = '';
+    const flush = () => void (text && lines.push(text), (text = ''));
+    for (const [i, frame] of frames.entries()) {
+      const byId = new Map(frame.nodes.map((n) => [n.nodeId, n]));
+      const optionsOf = (n: AX): string[] =>
+        (n.childIds ?? []).flatMap((c) => {
+          const k = byId.get(c);
+          if (!k) return [];
+          return k.role?.value === 'option' ? [String(k.name?.value ?? '').trim()] : optionsOf(k);
+        });
+      // `repeat` is the enclosing control's or heading's name: text that repeats it is not printed again.
+      const walk = (n: AX | undefined, repeat: string, inOptions: boolean): void => {
+        if (!n) return;
+        const role = editable(n) ? 'textbox' : String(n.role?.value ?? '');
+        const name = String(n.name?.value ?? '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const next = (r = repeat, o = inOptions) =>
+          n.childIds?.forEach((c) => walk(byId.get(c), r, o));
+        if (n.ignored) return next();
+        if (role === 'option' && inOptions) return;
+        if (role === 'StaticText') {
+          if (name && !repeat.includes(name) && (visible?.includes(name.toLowerCase()) ?? true))
+            text += `${text ? ' ' : ''}${name}`;
+          return;
+        }
+        const id = n.backendDOMNodeId;
+        if (
+          id &&
+          (STATE_ROLES.has(role) || (AxHelpers.prop(n, 'focusable') && role !== 'RootWebArea'))
+        ) {
+          if (text === name) text = ''; // its label
+          flush();
+          const options = role === 'combobox' || role === 'listbox' ? optionsOf(n) : [];
+          const value = n.value?.value;
+          lines.push(
+            [
+              `${previous.size && !previous.has(id) ? '*' : ''}[${id}] ${role}`,
+              name && `"${clip(name, 200)}"`,
+              value !== undefined &&
+                value !== '' &&
+                `= ${JSON.stringify(clip(String(value), 200))}`,
+              ...Object.entries(STATES).map(([p, words]) => words[String(AxHelpers.prop(n, p))]),
+              options.length &&
+                ` options: ${options.slice(0, 5).join(' | ')}${options.length > 5 ? ` | … ${options.length - 5} more` : ''}`,
+            ]
+              .filter(Boolean)
+              .join(' '),
+          );
+          this.shown.set(id, i ? { ...axNodes([n])[0]!, role } : undefined);
+          return next(name || repeat, inOptions || options.length > 0);
+        }
+        if (role === 'heading') {
+          flush();
+          lines.push(`## ${name}`);
+          return next(name);
+        }
+        if (!INLINE.has(role)) flush();
+        next();
+      };
+      const before = lines.length;
+      walk(frame.nodes[0], '', false);
+      flush();
+      if (i && lines.length > before) lines.splice(before, 0, `--- frame ${frame.url} ---`);
     }
-    const result = {
-      url: snap.url,
-      title: snap.title,
-      controls: controls.slice(0, max),
-      more: Math.max(0, controls.length - max),
-      text: clip(textParts.join('\n'), limit),
-    };
+    const max = options.max ?? 8000;
+    const all = lines.join('\n');
+    const cut = all.length > max ? all.lastIndexOf('\n', max) + 1 || max : all.length;
+    const body = all.slice(0, cut).trimEnd();
+    const more = all.slice(cut).split('\n').filter(Boolean).length;
+    const tabs = targets.targetInfos.filter((t) => t.type === 'page' && t.url !== 'about:blank');
     this.log(
-      `[state] ${result.title} | ${result.url}${this.flushDialogs()}\n${result.controls.map(brief).join('\n')}${result.more ? `\n… ${result.more} more controls: bu.find('word')` : ''}\n[text] ${result.text}${size > limit ? '\n(text cut here: bu.read() returns the rest of the page)' : ''}`,
+      `[state] ${info.title} | ${info.url}${tabs.length > 1 ? ` | ${tabs.length} tabs` : ''}${settled.pending ? ` | loading: ${settled.pending}` : ''}${this.flushDialogs()}\n${body}${more ? `\n... ${more} more lines (bu.state({max: 30000}) or page.evaluate)` : ''}\n[/state]`,
     );
-    return printed(result, '[state printed above]');
+    return printed({ url: info.url, title: info.title, text: body }, '[state printed above]');
   }
 
   /** Web search through the host's endpoint (Browser Use Cloud's /api/v4/search contract), no browser tab. */
@@ -489,6 +585,9 @@ export class AxHelpers {
       target = Number(target.trim().replace('#', ''));
     if (typeof target === 'number') {
       matches = snap.nodes.filter((n) => n.id === target);
+      // The state print covers child frames that name lookups skip; a gone node fails in point() before any input.
+      const framed = this.shown.get(target);
+      if (!matches.length && framed) matches = [framed];
       label = `#${target}`;
       if (!matches.length)
         throw new Error(
