@@ -462,8 +462,8 @@ export class AxHelpers {
           const value = n.value?.value;
           lines.push(
             [
-              `${previous.size && !previous.has(id) ? '*' : ''}[${id}] ${role}`,
-              name && `"${clip(name, 200)}"`,
+              // Quoted even when empty, so an unnamed control's role is not taken for its name.
+              `${previous.size && !previous.has(id) ? '*' : ''}[${id}] ${role} "${clip(name, 200)}"`,
               value !== undefined &&
                 value !== '' &&
                 `= ${JSON.stringify(clip(String(value), 200))}`,
