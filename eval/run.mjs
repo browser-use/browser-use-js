@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, appendFile, readdir, lstat, rm } from 'node
 import { join, resolve, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 export function parseOptions(value) {
@@ -18,6 +18,11 @@ export function parseOptions(value) {
     'evidence_format',
     'research_tools',
     'delivery_review',
+    'semantic',
+    'coordinate_mode',
+    'service_tier',
+    'cell_timeout_ms',
+    'success_observer',
   ]);
   if (!value || Array.isArray(value) || typeof value !== 'object')
     throw new Error('options must be an object');
@@ -29,8 +34,22 @@ export function parseOptions(value) {
     task_timeout_seconds: 1700,
     proxy_country_code: 'us',
     browser_timeout_minutes: 60,
+    cell_timeout_ms: 120000,
     ...value,
   };
+  for (const key of ['semantic', 'coordinate_mode', 'success_observer'])
+    if (options[key] !== undefined && typeof options[key] !== 'boolean')
+      throw new Error(`${key} must be boolean`);
+  if (options.semantic && options.coordinate_mode)
+    throw new Error('coordinate_mode runs without the bu helpers; do not combine it with semantic');
+  if (options.service_tier !== undefined && !['priority', 'flex'].includes(options.service_tier))
+    throw new Error('service_tier must be priority or flex');
+  if (
+    !Number.isInteger(options.cell_timeout_ms) ||
+    options.cell_timeout_ms < 1000 ||
+    options.cell_timeout_ms > 600000
+  )
+    throw new Error('cell_timeout_ms must be 1000..600000');
   if (!['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(options.reasoning_effort))
     throw new Error('Invalid reasoning_effort');
   if (
@@ -150,11 +169,78 @@ async function archiveAudit(workspace) {
   }
 }
 
+/** Screenshot-and-coordinates only. The viewport is measured on the task's browser, never assumed. */
+function coordinatePrompt({ width, height }) {
+  return `COORDINATE MODE. Interact only by looking at screenshots and outputting coordinates.
+- Stay in the current tab: await page.goto(url). Never open new tabs; screenshot() captures this tab only.
+- Wait for pages with await page.waitFor(() => document.readyState === 'complete'), not fixed sleeps.
+- Look: await screenshot(). Screenshot pixels are exactly page.clickAt coordinates (viewport ${width}x${height}).
+- Click: await page.clickAt(x, y). Type into the focused field: await page.cdp('Input.insertText', {text: 'Zurich'}).
+- Keys: await page.cdp('Input.dispatchKeyEvent', {type:'keyDown', key:'Enter', code:'Enter', windowsVirtualKeyCode:13}); then the same with type:'keyUp'.
+- Chain every click and keystroke you are sure of in one javascript call, and end each call with await screenshot().
+- Never use page.evaluate, querySelector, page.snapshot, the accessibility tree or DOM.* to find or click elements. For the final answer you may read visible text with page.evaluate(() => document.body.innerText).`;
+}
+
+async function measureViewport(CDP, imageDimensions, cdpUrl) {
+  const connection = CDP.lazy(cdpUrl, 5000);
+  try {
+    const { targetInfos } = await connection.send('Target.getTargets');
+    const page = targetInfos.find((t) => t.type === 'page');
+    if (!page) throw new Error('No page target to measure');
+    const { sessionId } = await connection.send('Target.attachToTarget', {
+      targetId: page.targetId,
+      flatten: true,
+    });
+    const { result } = await connection.send(
+      'Runtime.evaluate',
+      { expression: '[innerWidth, innerHeight]', returnByValue: true },
+      sessionId,
+    );
+    const { data } = await connection.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+    const shot = imageDimensions(Buffer.from(data, 'base64'));
+    await connection.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+    const [width, height] = result.value;
+    // The prompt promises screenshot pixels equal click coordinates.
+    if (shot.width !== width || shot.height !== height)
+      throw new Error(
+        `Screenshot ${shot.width}x${shot.height} differs from viewport ${width}x${height}`,
+      );
+    return { width, height };
+  } finally {
+    connection.close();
+  }
+}
+
+/** The platform's judge-owned success observer: a separate process with its own CDP client. */
+async function startSuccessObserver(script, cdpUrl, evidencePath) {
+  const child = spawn(process.execPath, [script, cdpUrl, evidencePath], {
+    stdio: ['ignore', 'ignore', 'inherit'],
+  });
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  for (let waited = 0; ; waited += 100) {
+    try {
+      await readFile(evidencePath);
+      return { child, exited };
+    } catch {}
+    if (child.exitCode !== null || waited > 15000) {
+      child.kill('SIGKILL');
+      throw new Error('Success observer did not attach to the browser');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function stopSuccessObserver(observerProcess) {
+  if (!observerProcess || observerProcess.child.exitCode !== null) return;
+  observerProcess.child.kill('SIGTERM');
+  await Promise.race([observerProcess.exited, new Promise((resolve) => setTimeout(resolve, 5000))]);
+}
+
 export async function main() {
   const env = process.env;
   const workspace = resolve(env.EVAL_WORKSPACE);
   const resultPath = resolve(env.EVAL_RESULT_PATH);
-  let browser, agent, observer, Laminar, root;
+  let browser, agent, observer, Laminar, root, successObserver, viewport;
   const spans = new Map();
   let modelSpan;
   let envelope = {
@@ -189,7 +275,10 @@ export async function main() {
       throw new Error('Model, browser, and Laminar credentials are required');
     const task = JSON.parse(await readFile(env.EVAL_TASK_PATH, 'utf8'));
     const sdk = resolve(env.EVAL_TARGET_DIR);
-    const { BrowserUse, CDP } = await import(pathToFileURL(join(sdk, 'dist/index.js')).href);
+    const { BrowserUse, CDP, builtinModels } = await import(
+      pathToFileURL(join(sdk, 'dist/index.js')).href
+    );
+    const { imageDimensions } = await import(pathToFileURL(join(sdk, 'dist/images.js')).href);
     const require = createRequire(join(sdk, 'package.json'));
     const telemetry = require('@lmnr-ai/lmnr');
     Laminar = telemetry.Laminar;
@@ -225,14 +314,50 @@ export async function main() {
     if (!browser.id || !browser.cdpUrl)
       throw new Error('Browser provider returned no browser id/CDP endpoint');
     observer = CDP.lazy(browser.cdpUrl, 1500);
+    if (options.coordinate_mode)
+      viewport = await measureViewport(CDP, imageDimensions, browser.cdpUrl);
+    if (options.success_observer) {
+      if (!env.SUCCESS_OBSERVER_SCRIPT)
+        throw new Error('success_observer needs SUCCESS_OBSERVER_SCRIPT from the platform harness');
+      successObserver = await startSuccessObserver(
+        env.SUCCESS_OBSERVER_SCRIPT,
+        browser.cdpUrl,
+        join(workspace, 'observed_success.json'),
+      );
+    }
+    const models = builtinModels();
     let deliveryReviewSubmissions = 0;
     agent = await BrowserUse.create({
       model,
+      models,
       reasoning: options.reasoning_effort,
       browser: { cdpUrl: browser.cdpUrl },
       workspace: outputDir,
-      cellTimeoutMs: 120000,
+      cellTimeoutMs: options.cell_timeout_ms,
       operationTimeoutMs: 20000,
+      ...(options.semantic ? { mode: 'ultrafast' } : {}),
+      // The platform's search proxy uses the cloud worker's names for the same endpoint.
+      ...(process.env.V4_GATEWAY_URL && process.env.V4_RUN_TOKEN
+        ? {
+            webSearch: {
+              url: `${process.env.V4_GATEWAY_URL}/api/v4/search`,
+              token: process.env.V4_RUN_TOKEN,
+            },
+          }
+        : {}),
+      ...(options.service_tier
+        ? {
+            // streamSimple drops serviceTier, so set it on the request body.
+            streamFn: (m, context, streamOptions) =>
+              models.streamSimple(m, context, {
+                ...streamOptions,
+                onPayload: async (payload, requestModel) => ({
+                  ...((await streamOptions?.onPayload?.(payload, requestModel)) ?? payload),
+                  service_tier: options.service_tier,
+                }),
+              }),
+          }
+        : {}),
       researchTools: options.research_tools ?? options.evidence_format === 'findings',
       ...(options.delivery_review
         ? {
@@ -242,7 +367,7 @@ export async function main() {
             },
           }
         : {}),
-      instructions: `${options.evidence_format === 'findings' ? 'Use browser UI, public search and source APIs for research; use files/scripts for processing.' : 'Use browser UI and page evaluation for research. Do not use web search.'} Do not read files outside the output workspace or inspect benchmark source, rubrics, judge code, or credentials. Save requested files incrementally in workspace.`,
+      instructions: `${options.evidence_format === 'findings' ? 'Use browser UI, public search and source APIs for research; use files/scripts for processing.' : 'Use browser UI and page evaluation for research.'} Do not read files outside the output workspace or inspect benchmark source, rubrics, judge code, or credentials. Save requested files in workspace.${viewport ? `\n${coordinatePrompt(viewport)}` : ''}`,
     });
     const findings = options.evidence_format === 'findings';
     const steps = [];
@@ -418,6 +543,7 @@ export async function main() {
         ),
       false,
     );
+    await stopSuccessObserver(successObserver);
     let findingsEvidence = {};
     if (findings) {
       const evidencePath = join(workspace, 'findings-evidence.json');
@@ -445,11 +571,13 @@ export async function main() {
       (await files(outputDir))
         .map((p) => `agent_outputs/${p}`)
         .concat((await files(screenshots)).map((p) => `judge_screenshots/${p}`))
-        .concat(['events.jsonl', 'agent_steps.txt', 'final_message.txt', 'sdk-result.json']),
+        .concat(['events.jsonl', 'agent_steps.txt', 'final_message.txt', 'sdk-result.json'])
+        .concat(successObserver ? ['observed_success.json'] : []),
       {
         ...findingsEvidence,
         browser: { id: browser.id },
         options,
+        ...(viewport ? { viewport } : {}),
         node: process.version,
         dependency_lock_sha256: (
           await readFile(join(workspace, 'dependencies.sha256'), 'utf8')
@@ -469,6 +597,7 @@ export async function main() {
   } finally {
     modelSpan?.end();
     for (const span of spans.values()) span.end();
+    await stopSuccessObserver(successObserver);
     try {
       await agent?.close();
     } catch (error) {
