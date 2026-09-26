@@ -41,7 +41,7 @@ Ultrafast: the global \`bu\` in the javascript REPL. Each model call costs ~1 s,
 - Element code: await bu.js(1400, (el, arg) => el.innerText, arg) runs on that element in the page and returns the value.
 - Raw: upload await page.cdp('DOM.setFileInputFiles', {backendNodeId: id, files: [path]}); keys await page.cdp('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}) then the same with type 'keyUp'; drag with Input.dispatchMouseEvent mousePressed, mouseMoved, mouseReleased.
 - If a helper fails once, do it raw. Read data with page.evaluate(() => ...).
-- Never add blind sleeps (setTimeout): actions and bu.state() wait for the page; look with bu.state() when results may still be loading.
+- After a javascript call whose bu actions reached the page, the state is printed automatically. Never add blind sleeps (setTimeout): actions and bu.state() wait for the page; look again with bu.state() when results may still be loading.
 `;
 
 /** State print and id-based actions on Chrome's accessibility tree. Raw page/CDP stays available. */
@@ -58,6 +58,8 @@ export class AxHelpers {
   private dialogs: string[] = [];
   /** Role and name of every id in the last print: marks new ids and re-finds re-rendered ones. */
   private last = new Map<number, { role: string; name: string }>();
+  /** Set once an action reached the page; the worker prints the state after that cell. */
+  acted = false;
 
   /** Track in-flight requests per page session from CDP Network events (no page patching). */
   private async trackNetwork(page: Page) {
@@ -250,6 +252,7 @@ export class AxHelpers {
   /** The page as one list in page order; only the newest print stays in the model's context. */
   async state(options: { max?: number } = {}) {
     const page = this.page();
+    this.acted = false; // a look after the last action replaces the automatic print
     const settled = await this.settle({ capMs: 3000 });
     const [frames, info, visible, targets] = await Promise.all([
       this.capture(page),
@@ -470,6 +473,7 @@ export class AxHelpers {
         `${op} ${this.describe(id)} failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    this.acted = true;
     await this.settle();
     const line = `[ok] ${op} ${this.describe(done.id)}${done.value}${done.note} -> ${await this.change(before)}${this.flushDialogs()}`;
     this.log(line);
@@ -585,6 +589,7 @@ export class AxHelpers {
     );
     const change = await this.change(before);
     if (change !== 'no change') {
+      this.acted = true;
       await this.settle();
       this.log(
         `[ok] js ${this.describe(done.id)}${done.note} -> ${await this.change(before)}${this.flushDialogs()}`,

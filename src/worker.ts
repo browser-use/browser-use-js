@@ -341,6 +341,11 @@ process.on('message', async (message: WorkerRequest) => {
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
   } finally {
+    // After a cell whose bu actions reached the page, show the resulting state without another model turn.
+    if (bu?.acted)
+      await bu
+        .state()
+        .catch((error: unknown) => sink.write(`[state unavailable: ${String(error)}]\n`));
     active = false;
     browser.observeResponse = undefined;
     captureResponse = undefined;
