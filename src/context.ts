@@ -46,13 +46,30 @@ export class RunContext {
       (m) => m.role === 'toolResult' && m.content.some((c) => c.type === 'image'),
     );
     const keep = new Set(images.slice(-2));
+    // Only the newest [state] print stays; walk from the end so the first block seen is kept.
+    let newest = true;
+    const states = (text: string) => {
+      const parts = text.split(/(\[state\] [\s\S]*?\n\[\/state\])/);
+      for (let i = parts.length - 2; i > 0; i -= 2)
+        if (newest) newest = false;
+        else parts[i] = '[state replaced by a newer one]';
+      return parts.join('');
+    };
     return [
       ...messages.filter((m) => m.role === 'system'),
-      ...projected.map((m) =>
-        m.role === 'toolResult' && !keep.has(m)
-          ? { ...m, content: m.content.filter((c) => c.type !== 'image') }
-          : m,
-      ),
+      ...projected
+        .toReversed()
+        .map((m) =>
+          m.role === 'toolResult'
+            ? {
+                ...m,
+                content: m.content
+                  .filter((c) => keep.has(m) || c.type !== 'image')
+                  .map((c) => (c.type === 'text' ? { ...c, text: states(c.text) } : c)),
+              }
+            : m,
+        )
+        .toReversed(),
     ];
   }
   tokens(messages: AgentMessage[], system: string): number {

@@ -34,20 +34,6 @@ function controlState(node: Protocol.Accessibility.AXNode) {
   return state;
 }
 
-/** Chrome's AX nodes as compact snapshot nodes; ignored and DOM-less nodes are dropped. */
-export const axNodes = (nodes: Protocol.Accessibility.AXNode[]): AXNode[] =>
-  nodes
-    .filter((n) => !n.ignored && n.backendDOMNodeId)
-    .map((n) => ({
-      id: n.backendDOMNodeId!,
-      role: String(n.role?.value ?? ''),
-      name: String(n.name?.value ?? '')
-        .replace(/\s+/g, ' ')
-        .trim(),
-      ...(n.value ? { value: String(n.value.value) } : {}),
-      ...controlState(n),
-    }));
-
 /** A tab with explicit CDP, page evaluation and observation. No selector/action layer. */
 export class Page {
   private constructor(
@@ -157,7 +143,20 @@ export class Page {
   }
   async snapshot(): Promise<{ url: string; title: string; nodes: AXNode[] }> {
     const { nodes } = await this.cdp('Accessibility.getFullAXTree');
-    return { ...(await this.info()), nodes: axNodes(nodes) };
+    return {
+      ...(await this.info()),
+      nodes: nodes
+        .filter((n) => !n.ignored && n.backendDOMNodeId)
+        .map((n) => ({
+          id: n.backendDOMNodeId!,
+          role: String(n.role?.value ?? ''),
+          name: String(n.name?.value ?? '')
+            .replace(/\s+/g, ' ')
+            .trim(),
+          ...(n.value ? { value: String(n.value.value) } : {}),
+          ...controlState(n),
+        })),
+    };
   }
   async clickAt(x: number, y: number) {
     if (![x, y].every(Number.isFinite)) throw new Error('Coordinates must be finite.');

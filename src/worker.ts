@@ -97,11 +97,14 @@ const bu =
     ? new AxHelpers(
         () => Reflect.get(realm, 'page') as Page,
         () => browser,
-        config.workspace,
         (text) => (Reflect.get(realm, 'console') as Console).log(text),
-        config.webSearch,
       )
     : undefined;
+// The search endpoint under the cloud worker's names, for the prompt's fetch example.
+if (config.webSearch) {
+  process.env.V4_GATEWAY_URL = config.webSearch.url.replace(/\/api\/v4\/search$/, '');
+  process.env.V4_RUN_TOKEN = config.webSearch.token;
+}
 Object.assign(realm, {
   global: realm, // Node's global alias refers to this REPL realm, not the worker host.
   // Reject values JSON would silently drop or change. Dates/toJSON use normal JSON semantics.
@@ -338,19 +341,6 @@ process.on('message', async (message: WorkerRequest) => {
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
   } finally {
-    // After a cell that changed the page through bu.*, show the resulting state without another model turn.
-    if (bu?.dirty) {
-      bu.dirty = false;
-      // Full AX snapshots of very large pages can stall the renderer; don't add one the model didn't ask for.
-      if (bu.snapshotMs > 3000)
-        sink.write(
-          `[state skipped: this page's AX tree took ${bu.snapshotMs} ms; call bu.find() or bu.state() if needed]\n`,
-        );
-      else
-        await bu
-          .state({ max: 30, text: 1200 })
-          .catch((error: unknown) => sink.write(`[state unavailable: ${String(error)}]\n`));
-    }
     active = false;
     browser.observeResponse = undefined;
     captureResponse = undefined;

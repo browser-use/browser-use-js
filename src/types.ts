@@ -14,12 +14,9 @@ import type { DomainOptions, SensitiveData } from './policy.js';
 import type { BrowserOptions } from './browser.js';
 
 export interface BrowserUseOptions extends DomainOptions {
-  /** 'ultrafast' adds the `bu` helpers (act on controls by accessible name, short page-settle waits) to the REPL. */
+  /** 'ultrafast' adds the `bu` helpers (page state and actions by accessibility-tree id, short page-settle waits) to the REPL. */
   mode?: 'default' | 'ultrafast';
-  /**
-   * Enables bu.search in ultrafast mode. POST {query} with the bearer token; the reply is {results: text blocks of
-   * "Title:", "URL:" and "Highlights:" lines separated by "\n\n---\n\n"} (Browser Use Cloud's /api/v4/search).
-   */
+  /** A search endpoint with Browser Use Cloud's /api/v4/search contract; the prompt teaches the model to fetch it. */
   webSearch?: { url: string; token: string };
   sensitiveData?: SensitiveData;
   /** Anonymous run counters. Disable with false, DO_NOT_TRACK=1 or ANONYMIZED_TELEMETRY=false. */
