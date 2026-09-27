@@ -391,17 +391,25 @@ export async function runAgent(
       const ending = agent.state.messages.findLast((m) => m.role === 'assistant');
       // One delivery-only repair. The original timer, transcript and budgets remain in force.
       if (!completion && !stopped && ending?.role === 'assistant' && ending.stopReason === 'stop') {
+        // A text ending that passes the schema and validateResult (a plain string) is the result.
+        const said = ending.content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('\n');
+        let rejected = '';
+        if (said.trim())
+          await acceptResult(said, options.signal).catch((e) => (rejected = `${e}\n`));
         const repair: AgentMessage = {
           role: 'user',
           content: [
             {
               type: 'text',
-              text: 'The run ended without a validated delivery. Use finish_from_js for an existing result or finish for a concise answer. Preserve all verified records; report missing evidence honestly. Do not repeat browser actions. This is the single delivery repair turn.',
+              text: `${rejected}The run ended without a validated delivery. Use finish_from_js for an existing result or finish for a concise answer. Preserve all verified records; report missing evidence honestly. Do not repeat browser actions. This is the single delivery repair turn.`,
             },
           ],
           timestamp: Date.now(),
         };
-        if (!checkBudgets([...agent.state.messages, repair], agent.state.systemPrompt)) {
+        if (
+          !completion &&
+          !checkBudgets([...agent.state.messages, repair], agent.state.systemPrompt)
+        ) {
           finishRepairs = 1;
           await agent.prompt(repair);
         }
