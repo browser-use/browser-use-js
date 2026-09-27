@@ -133,9 +133,10 @@ test('step limits stop the loop without inventing a completed result', async () 
     await s.close();
   }
 });
-test('model failures and plain unfinished answers are distinct from completion', async () => {
+test('model failures, text answers and unfinished structured answers stay distinct', async () => {
   const s = await session([
     fauxAssistantMessage('partial', { stopReason: 'error', errorMessage: 'provider unavailable' }),
+    fauxAssistantMessage('391'),
     fauxAssistantMessage('I will start'),
     fauxAssistantMessage('Still unfinished'),
   ]);
@@ -143,7 +144,11 @@ test('model failures and plain unfinished answers are distinct from completion',
     const failure = await s.agent.run('Research');
     assert.equal(failure.status, 'error');
     assert.match(failure.error, /provider unavailable/);
-    assert.equal((await s.agent.run('Research')).status, 'incomplete');
+    const answer = await s.agent.run('Multiply 17 by 23');
+    assert.equal(answer.output, '391');
+    assert.equal(answer.finishRepairs, 0);
+    const schema = Type.Object({ count: Type.Number() });
+    assert.equal((await s.agent.run('Research', { schema })).status, 'incomplete');
   } finally {
     await s.close();
   }
@@ -420,7 +425,7 @@ test('repair is one turn even when it calls an invalid finish', async () => {
     call('finish', { result: 'unreachable' }),
   ]);
   try {
-    const result = await s.agent.run('Deliver');
+    const result = await s.agent.run('Deliver', { schema: Type.Object({ count: Type.Number() }) });
     assert.equal(result.status, 'incomplete');
     assert.equal(result.finishRepairs, 1);
     assert.equal(result.text, 'partial evidence');
