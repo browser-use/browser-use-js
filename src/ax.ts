@@ -148,6 +148,12 @@ export class AxHelpers {
               Array.from(r.addedNodes).concat(Array.from(r.removedNodes)).some(own)
             )
               continue;
+            // Writing an attribute's current value changes nothing (Google Flights rewrites a class every frame).
+            if (
+              r.attributeName &&
+              r.oldValue === (r.target as Element).getAttribute(r.attributeName)
+            )
+              continue;
             if (r.attributeName !== 'style') real = true;
             else if (now - (styled.get(r.target) ?? -1e9) > 200) real = true;
             if (r.attributeName === 'style') styled.set(r.target, now);
@@ -161,6 +167,7 @@ export class AxHelpers {
           subtree: true,
           childList: true,
           attributes: true,
+          attributeOldValue: true,
           characterData: true,
         });
         for (const type of ['input', 'change']) addEventListener(type, () => w.__buN++, true);
