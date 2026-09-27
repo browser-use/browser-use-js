@@ -32,12 +32,12 @@ const printed = (line: string) =>
 export const AX_PROMPT = `
 
 Ultrafast: the global \`bu\` in the javascript REPL. Each model call costs ~1 s, so chain everything you already know into one javascript call.
-- Look: await page.goto(url); await bu.state() prints the page in order: [id] role "name" = value plus states, ## headings and visible text; * marks ids new since the last look. After a javascript call whose bu actions reached the page, the state is printed automatically.
+- Look: await page.goto(url); await bu.state() prints the page in order and returns that text: [id] role "name" = value plus states, ## headings and visible text; * marks ids new since the last look. After a javascript call whose bu actions reached the page, the state is printed automatically.
   Ids are Chrome backendNodeIds: they work in bu.* and in every CDP DOM command.
-- Act: await bu.click(1400); await bu.type(812, 'Zurich'); await bu.type(830, 'Oct 14', {enter: true}). type replaces the field's text; on a select it picks the option with that label.
+- Act: await bu.click(1400); await bu.type(812, 'Zurich'); await bu.type(830, 'Oct 14', {enter: true}). type replaces the field's text. bu.type(id, 'Canada') also picks a native select option; don't click it first.
   Each action prints one line: navigated to <url> / page changed / no change. Autocomplete: type, look, then click the suggestion.
-- Raw: upload await page.cdp('DOM.setFileInputFiles', {backendNodeId: fileId, files: [await artifact('cv.txt', 'text')]}); keys await page.cdp('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}) then the same with type 'keyUp'; drag with Input.dispatchMouseEvent mousePressed, mouseMoved, mouseReleased.
-- If a helper fails once, do it raw. Read data with page.evaluate(() => ...). Never add blind sleeps (setTimeout): actions and bu.state() wait for the page.
+- Raw: upload to a file line with await page.cdp('DOM.setFileInputFiles', {backendNodeId: id, files: [await artifact('cv.txt', 'text')]}); keys await page.cdp('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}) then the same with type 'keyUp'; drag with Input.dispatchMouseEvent mousePressed, mouseMoved, mouseReleased.
+- If a helper fails once, do it raw. Read data with page.evaluate(() => ...), but confirm an outcome with bu.state() (visible text only), not innerText. Never add blind sleeps (setTimeout): actions and bu.state() wait for the page.
 `;
 
 /** State print and id-based actions on Chrome's accessibility tree. Raw page/CDP stays available. */
@@ -250,11 +250,12 @@ export class AxHelpers {
     const page = this.page();
     this.acted = false; // a look after the last action replaces the automatic print
     const settled = await this.settle({ capMs: 3000 });
-    const [frames, info, visible, targets] = await Promise.all([
+    const [frames, info, visible, targets, files] = await Promise.all([
       this.capture(page),
       page.info(),
       this.visibleText(page).catch(() => undefined),
       this.browser().send('Target.getTargets'),
+      this.fileInputs(page).catch(() => []),
     ]);
     const previous = this.last;
     this.last = new Map();
@@ -331,6 +332,16 @@ export class AxHelpers {
       flush();
       if (frame.url && lines.length > start) lines.splice(start, 0, `--- frame ${frame.url} ---`);
     }
+    // Styled uploaders hide their file input, which drops it from the AX tree; its id still works for uploads.
+    const hidden = files
+      .filter((f) => !this.last.has(f.backendNodeId))
+      .map((f) => {
+        const at = (k: string) => f.attributes?.find((_, i, a) => i % 2 === 1 && a[i - 1] === k);
+        const name = at('aria-label') ?? at('name') ?? at('id') ?? '';
+        this.last.set(f.backendNodeId, { role: 'file', name });
+        return `[${f.backendNodeId}] file "${name}" (hidden)`;
+      });
+    lines.unshift(...hidden);
     const tabs = targets.targetInfos.filter(
       (t) => t.type === 'page' && t.url !== 'about:blank',
     ).length;
@@ -355,6 +366,17 @@ export class AxHelpers {
     const out = `${header}\n${body.join('\n')}\n[/state]`;
     this.log(out);
     return printed(out);
+  }
+
+  private async fileInputs(page: Page) {
+    const { root } = await page.cdp('DOM.getDocument', { depth: 0 });
+    const { nodeIds } = await page.cdp('DOM.querySelectorAll', {
+      nodeId: root.nodeId,
+      selector: 'input[type=file]',
+    });
+    return Promise.all(
+      nodeIds.map(async (nodeId) => (await page.cdp('DOM.describeNode', { nodeId })).node),
+    );
   }
 
   private async onNode<T>(page: Page, id: number, fn: string, argument?: unknown): Promise<T> {
