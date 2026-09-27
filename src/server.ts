@@ -211,6 +211,8 @@ const CREATE_KEYS = new Set([
   'modelId',
   'modelInfo',
   'streamDeltas',
+  'mode',
+  'webSearch',
 ]);
 async function dispatch(method: string, params: Record<string, unknown>): Promise<unknown> {
   if (method === 'ping') return { protocol: 1, node: process.versions.node };
