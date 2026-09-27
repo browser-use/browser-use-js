@@ -21,6 +21,8 @@ export interface CellResult {
   valueJson?: string;
   /** Full output is written to the workspace when the model-facing output is truncated. */
   outputFile?: string;
+  /** Open todowrite items after this cell, as printed. */
+  plan?: string;
 }
 export interface WorkerConfig extends importPolicy {
   mode?: 'default' | 'ultrafast';

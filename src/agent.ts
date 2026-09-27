@@ -74,6 +74,8 @@ export async function runAgent(
   let providerRetries = 0;
   let retriedUsage = zeroUsage();
   let finalizing = false;
+  let openPlan: string | undefined;
+  let planShown = false;
   let compactionFailed = false;
   const warnings: string[] = [];
   const context = new RunContext(
@@ -103,8 +105,10 @@ export async function runAgent(
       let result;
       try {
         result = await runtime.execute(params.code, config.cellTimeoutMs ?? 30_000, signal);
+        openPlan = result.plan;
       } catch (error) {
         if (!(error instanceof CellError)) throw error;
+        openPlan = error.result.plan;
         // Pi converts thrown tools to text-only errors. Restore their native evidence
         // in afterToolCall while retaining Pi's error flag and application hook control.
         cellFailures.set(_id, error);
@@ -127,6 +131,13 @@ export async function runAgent(
       throw new Error(
         `Final result does not match schema: ${JSON.stringify(Errors(schema, output).slice(0, 5)).slice(0, 2000)}`,
       );
+    // The model accounts for its own plan once; after that it may finish with items still open.
+    if (openPlan && !planShown && !finalizing && !finishRepairs) {
+      planShown = true;
+      throw new Error(
+        `${openPlan}\nMark each open item completed, or cancelled with the reason, then finish again.`,
+      );
+    }
     if (config.validateResult) {
       const feedback = await bounded(
         () => config.validateResult!(output, signal),

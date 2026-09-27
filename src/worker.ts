@@ -394,6 +394,7 @@ process.on('message', async (message: WorkerRequest) => {
     ...(browser.observationTargetId ? { observationTargetId: browser.observationTargetId } : {}),
     ...(valueJson !== undefined ? { valueJson } : {}),
     ...(outputFile ? { outputFile } : {}),
+    ...(plan ? { plan } : {}),
   };
   if (failure) send({ type: 'error', message: failure, result });
   else send({ type: 'result', result });
