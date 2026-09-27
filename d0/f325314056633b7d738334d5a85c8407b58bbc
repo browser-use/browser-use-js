@@ -1,0 +1,25 @@
+test/ownership.test.mjs
+  s_cafdfaabed1c36::t_70dffc98ee2694 237-262
+src/protocol.ts
+  s_cafdfaabed1c36::t_38439efd7c1bcc 20-21
+src/runtime.ts
+  s_cafdfaabed1c36::t_c8219ae4f7be72 54,56,64,230-231,271-273,287
+src/worker.ts
+  s_cafdfaabed1c36::t_8c6a0108da823b 348,354-355,372-373,376,383
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d0f325314056633b7d738334d5a85c8407b58bbc",
+  "prompts": {},
+  "sessions": {
+    "s_cafdfaabed1c36": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c3724c29-3783-4440-b876-0e2d1e24e545",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Gregor Žunič <36313686+gregpr07@users.noreply.github.com>"
+    }
+  }
+}
