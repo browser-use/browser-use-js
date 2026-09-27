@@ -12,6 +12,9 @@ type Listener = {
   reject(error: Error): void;
 };
 
+/** Debug only (BU_CDP_STATS): calls and summed ms per method, evaluate keyed by its first characters. */
+export const cdpStats: Record<string, { n: number; ms: number; max: number }> = {};
+
 /** Explicit commands and one-shot events over one flattened CDP WebSocket. No proxies. */
 export class CDP {
   private nextId = 0;
@@ -226,8 +229,19 @@ export class CDP {
       this.observeCommand?.(method, params, sessionId);
     } catch {}
     const id = ++this.nextId;
+    const key =
+      method === 'Runtime.evaluate'
+        ? `${method} ${String((params as { expression?: string }).expression)
+            .replace(/\s+/g, ' ')
+            .slice(0, 40)}`
+        : method;
+    const began = performance.now();
     return new Promise((resolve, reject) => {
       const finish = (error?: Error, value?: unknown) => {
+        const stat = (cdpStats[key] ??= { n: 0, ms: 0, max: 0 });
+        stat.n++;
+        stat.ms += performance.now() - began;
+        stat.max = Math.max(stat.max, performance.now() - began);
         clearTimeout(timer);
         this.pending.delete(id);
         if (error) reject(error);

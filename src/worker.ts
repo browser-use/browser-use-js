@@ -7,7 +7,7 @@ import { writeFile, rename } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { CDP } from './cdp.js';
+import { CDP, cdpStats } from './cdp.js';
 import { Page, Tabs } from './page.js';
 import type { Image, WorkerConfig, WorkerRequest, WorkerResponse } from './protocol.js';
 import { installDomainPolicy, fillSecret } from './policy.js';
@@ -313,6 +313,8 @@ async function evaluate(code: string, captureJson = false): Promise<string | und
 
 process.on('message', async (message: WorkerRequest) => {
   if (message.type === 'close') {
+    if (process.env.BU_CDP_STATS)
+      appendFileSync(process.env.BU_CDP_STATS, `${JSON.stringify(cdpStats)}\n`);
     browser.close();
     evaluator.disconnect();
     send({ type: 'closed' });
