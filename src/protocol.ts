@@ -23,6 +23,8 @@ export interface CellResult {
   outputFile?: string;
 }
 export interface WorkerConfig extends importPolicy {
+  mode?: 'default' | 'ultrafast';
+  webSearch?: { url: string; token: string };
   sensitiveData?: import('./policy.js').SensitiveData;
   redact?: string[];
   endpoint: string;
@@ -31,6 +33,9 @@ export interface WorkerConfig extends importPolicy {
   approveConnection?: boolean;
   workspace: string;
   targetId?: string;
+  focusTab?: boolean;
+  browserSwitching?: boolean;
+  dedicatedBrowser?: boolean;
   operationTimeoutMs: number;
   maxOutputChars: number;
 }
@@ -40,6 +45,7 @@ export type WorkerRequest =
 export type WorkerResponse =
   | { type: 'action'; action: BrowserAction }
   | { type: 'owned'; targetId: string }
+  | { type: 'endpoint'; endpoint: string }
   | { type: 'partial'; runId?: string; path: string; valueJson: string }
   | { type: 'ready'; targetId: string }
   | { type: 'result'; result: CellResult }

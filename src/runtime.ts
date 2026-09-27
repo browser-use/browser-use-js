@@ -89,6 +89,8 @@ export class BrowserRuntime {
         this.partial = { path: message.path, value: JSON.parse(message.valueJson) };
       if (message.type === 'action') this.onAction?.(message.action);
       if (message.type === 'owned') this.owned.add(message.targetId);
+      // A switched browser survives a worker restart.
+      if (message.type === 'endpoint') this.config.endpoint = message.endpoint;
     });
     worker.on('error', (error) => this.pending?.(error));
     worker.on('exit', (code, signal) => {
@@ -133,8 +135,8 @@ export class BrowserRuntime {
         else resolve(value);
       };
       const message = (value: WorkerResponse) => {
-        if (value.type !== 'owned' && value.type !== 'action' && value.type !== 'partial')
-          finish(value);
+        // Side messages a cell sends while running; only its result or error ends it.
+        if (!['owned', 'action', 'partial', 'endpoint'].includes(value.type)) finish(value);
       };
       const abort = () =>
         finish(
@@ -197,7 +199,12 @@ export class BrowserRuntime {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const outputFile = join(directory, `${randomUUID()}.txt`);
       await writeFile(outputFile, '', { flag: 'wx', mode: 0o600 });
-      const response = this.receive(worker, timeoutMs, signal);
+      // Ultrafast prints the page state after the cell's code, so its cells may run up to 10 s past timeoutMs.
+      const response = this.receive(
+        worker,
+        timeoutMs + (this.config.mode === 'ultrafast' ? 10_000 : 0),
+        signal,
+      );
       worker.send(
         { type: 'execute', code, captureJson, outputFile, runId: this.runId },
         (error) => {
@@ -239,7 +246,9 @@ export class BrowserRuntime {
     }
   }
 
-  async close() {
+  /** keepTabs leaves the tabs this session opened for a later session to continue in;
+   * 'current' keeps only the tab the agent is on, so scratch tabs do not pile up. */
+  async close({ keepTabs = false }: { keepTabs?: boolean | 'current' } = {}) {
     if (this.closed) return;
     this.closed = true;
     if (this.busy) {
@@ -255,7 +264,9 @@ export class BrowserRuntime {
       await response.catch(() => {});
     }
     await this.terminate();
-    if (this.owned.size) {
+    const keep = keepTabs === 'current' ? this.targetId : undefined;
+    if (keep) this.owned.delete(keep);
+    if (this.owned.size && keepTabs !== true) {
       const cdp = await CDP.connect(
         this.config.endpoint,
         this.config.operationTimeoutMs,
@@ -268,7 +279,8 @@ export class BrowserRuntime {
         while (previous !== this.owned.size) {
           previous = this.owned.size;
           for (const target of targetInfos)
-            if (target.openerId && this.owned.has(target.openerId)) this.owned.add(target.targetId);
+            if (target.openerId && this.owned.has(target.openerId) && target.targetId !== keep)
+              this.owned.add(target.targetId);
         }
         for (const targetId of this.owned) {
           if (targetInfos.some((t) => t.targetId === targetId))

@@ -20,6 +20,10 @@ export function contextChars(messages: AgentMessage[]): number {
   }).length;
 }
 
+/** Pi keeps the prompt as leading system messages; budgets count it once through `system`. */
+export const conversation = (messages: AgentMessage[]) =>
+  messages.filter((m) => m.role !== 'system');
+
 /** A provider projection; the original transcript remains available for accounting and audit. */
 export class RunContext {
   private covered = 0;
@@ -36,13 +40,16 @@ export class RunContext {
     private secrets: string[] = [],
   ) {}
   project(messages: AgentMessage[]): AgentMessage[] {
-    // Preserve every previously sent message until an explicit compaction. Removing
+    // Preserve every previously sent image until an explicit compaction. Removing
     // older images on each new screenshot rewrites the prefix and loses evidence.
-    return this.summary ? [this.summary, ...messages.slice(this.covered)] : [...messages];
+    const body = conversation(messages);
+    const projected = this.summary ? [this.summary, ...body.slice(this.covered)] : body;
+    return [...messages.filter((m) => m.role === 'system'), ...projected];
   }
 
   tokens(messages: AgentMessage[], system: string): number {
-    const projected = this.project(messages);
+    messages = conversation(messages);
+    const projected = conversation(this.project(messages));
     const estimate = projected.reduce(
       (sum, m) => sum + estimateTokens(m),
       Math.ceil(system.length / 4),
@@ -64,17 +71,18 @@ export class RunContext {
   }
   needsCompaction(messages: AgentMessage[], system: string) {
     return (
-      contextChars(this.project(messages)) + system.length > this.maxChars * 0.75 ||
+      contextChars(conversation(this.project(messages))) + system.length > this.maxChars * 0.75 ||
       this.tokens(messages, system) > this.model.contextWindow * 0.65
     );
   }
   fits(messages: AgentMessage[], system: string) {
     return (
-      contextChars(this.project(messages)) + system.length <= this.maxChars &&
+      contextChars(conversation(this.project(messages))) + system.length <= this.maxChars &&
       this.tokens(messages, system) < this.model.contextWindow * 0.85
     );
   }
   async prepare(messages: AgentMessage[], system: string, signal?: AbortSignal) {
+    messages = conversation(messages);
     if (!this.enabled || !this.needsCompaction(messages, system)) return;
     // Keep the last two complete assistant/tool groups. Never orphan a tool result.
     const starts = messages.flatMap((m, i) =>

@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Agent } from '@earendil-works/pi-agent-core';
 import { RunContext } from '../dist/context.js';
 import { workspaceFiles } from '../dist/history.js';
 import {
   createModels,
+  createInitialSystemMessage,
+  getCurrentSystemPrompt,
   fauxProvider,
   fauxAssistantMessage,
   fauxToolCall,
@@ -62,14 +65,20 @@ test('compaction archives exact image bytes privately and keeps a retrievable pa
     15000,
     true,
   );
+  const system = createInitialSystemMessage('Keep the system prompt unchanged.', []);
   const messages = [
+    system,
     { role: 'user', content: 'Never submit. Preserve visual evidence.', timestamp: 1 },
   ];
   for (let i = 0; i < 8; i++) messages.push(...group(i));
   try {
     await ctx.prepare(messages, 'system');
     assert.equal(ctx.compactions, 1);
-    const checkpoint = ctx.project(messages)[0].content;
+    const projected = ctx.project(messages);
+    assert.deepEqual(projected[0], system);
+    assert.equal(projected.filter((m) => m.role === 'system').length, 1);
+    assert.equal(getCurrentSystemPrompt(projected), 'Keep the system prompt unchanged.');
+    const checkpoint = projected[1].content;
     const archive = JSON.parse(checkpoint.match(/^Evidence archive \(JSON path\): (.+)$/m)[1]);
     const saved = JSON.parse(await readFile(archive, 'utf8'));
     const block = saved.messages
@@ -80,7 +89,11 @@ test('compaction archives exact image bytes privately and keeps a retrievable pa
     assert.deepEqual(await readFile(imagePath), Buffer.from(png, 'base64'));
     assert.equal((await stat(imagePath)).mode & 0o777, 0o600);
     assert.equal((await workspaceFiles(workspace)).length, 0);
-    assert.ok(messages[2].content.some((c) => c.type === 'image' && c.data === png));
+    assert.ok(
+      messages
+        .find((m) => m.role === 'toolResult')
+        .content.some((c) => c.type === 'image' && c.data === png),
+    );
     const compacted = JSON.stringify(ctx.project(messages));
     messages.push(...group(8));
     assert.equal(JSON.stringify(ctx.project(messages).slice(0, -2)), compacted);
@@ -97,3 +110,41 @@ test('retained screenshots still count against context limits', () => {
   assert.ok(ctx.tokens(images, '') > model.contextWindow);
   assert.equal(ctx.fits(images, ''), false);
 });
+
+for (const project of [false, true]) {
+  test(`Pi provider boundary retains all images ${project ? 'with Browser Use projection' : 'without a context hook'}`, async () => {
+    const faux = fauxProvider({ tokensPerSecond: 1e6 });
+    const models = createModels();
+    models.setProvider(faux.provider);
+    let seen = false;
+    faux.setResponses([
+      (context) => {
+        const captures = context.messages.filter((m) => m.role === 'toolResult');
+        assert.equal(captures.length, 3);
+        assert.ok(
+          captures.every((m) => m.content.some((c) => c.type === 'image' && c.data === png)),
+        );
+        assert.equal(getCurrentSystemPrompt(context.messages), 'Retain visual evidence.');
+        seen = true;
+        return fauxAssistantMessage('Reviewed all three captures.');
+      },
+    ]);
+    const ctx = new RunContext(faux.getModel(), () => {}, '/unused', 1000000, false);
+    const agent = new Agent({
+      initialState: {
+        systemPrompt: 'Retain visual evidence.',
+        model: faux.getModel(),
+        messages: [
+          { role: 'user', content: 'Review captures.', timestamp: 1 },
+          ...group(0),
+          ...group(1),
+          ...group(2),
+        ],
+      },
+      streamFn: models.streamSimple.bind(models),
+      ...(project ? { transformContext: (messages) => ctx.project(messages) } : {}),
+    });
+    await agent.prompt('Continue.');
+    assert.equal(seen, true, 'provider must see all screenshots');
+  });
+}
