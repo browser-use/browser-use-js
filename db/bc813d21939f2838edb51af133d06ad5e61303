@@ -1,0 +1,58 @@
+src/worker.ts
+  s_4bd8ed662096a6::t_5c136c11b96a68 351
+src/context.ts
+  s_4bd8ed662096a6::t_415e91615dd05a 27-29
+  s_4bd8ed662096a6::t_e821f6cbe583a2 60-62,64-65,72-74
+  s_4bd8ed662096a6::t_19ceddd00fdd35 52-55,59,63,66-71
+src/ax.ts
+  s_4bd8ed662096a6::t_82c3b2ee04c24f 78,81-88,94-101
+  s_4bd8ed662096a6::t_2f5b12edae9cd3 6,8
+  s_4bd8ed662096a6::t_f3eb8bf8ae6a4d 307
+  s_4bd8ed662096a6::t_9700ddd863a641 316-338,340-346,348-349,351-352
+  s_4bd8ed662096a6::t_fa2d6ddbb1195e 294
+  s_4bd8ed662096a6::t_2c7c36d8256c3c 418-420,422
+  s_4bd8ed662096a6::t_38d8b5a01ed13b 477
+  s_4bd8ed662096a6::t_3a2acc4abb4170 414
+  s_4bd8ed662096a6::t_6d636089fc633d 80,90-93
+  s_4bd8ed662096a6::t_d6eb6f7792bfbb 498
+  s_4bd8ed662096a6::t_ecaca95f33691c 500
+  s_4bd8ed662096a6::t_8ca5c0a66dc0b2 459
+  s_4bd8ed662096a6::t_dfebe095072cbc 79
+  s_4bd8ed662096a6::t_f3473443617772 143,387-391,393-397,400,405-407,410-413,415-417,421,423-458,460-463,476,478-491,493-497,502
+  s_4bd8ed662096a6::t_09bf6e3beec724 588-590
+  s_4bd8ed662096a6::t_ddb8dd20e1d34b 347,350
+  s_4bd8ed662096a6::t_1652bf15d82d07 129-133
+  s_4bd8ed662096a6::t_e4b779302490e0 464-475
+  s_4bd8ed662096a6::t_61fb0de10c2c91 274
+  s_4bd8ed662096a6::t_704188fb82739a 180
+  s_4bd8ed662096a6::t_94da02cc01d14b 408-409
+  s_4bd8ed662096a6::t_81e591afb5ea69 398-399,401-403
+  s_4bd8ed662096a6::t_01dee179eba2f1 89
+  s_4bd8ed662096a6::t_8b0abb1e6f2d57 134-136,140-142
+  s_4bd8ed662096a6::t_38d5841c4e5342 144
+  s_386edbf54bf8f0::t_2f27919a068568 137-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dbbc813d21939f2838edb51af133d06ad5e61303",
+  "prompts": {},
+  "sessions": {
+    "s_386edbf54bf8f0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-aexp-state-only-cbeb1c26ece939bd",
+        "model": "unknown"
+      },
+      "human_author": "Gregor Žunič <36313686+gregpr07@users.noreply.github.com>"
+    },
+    "s_4bd8ed662096a6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f76a213b-b710-4a4b-84c9-44a9fd5fec43",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Gregor Žunič <36313686+gregpr07@users.noreply.github.com>"
+    }
+  }
+}
