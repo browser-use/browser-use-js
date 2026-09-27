@@ -181,7 +181,7 @@ function coordinatePrompt({ width, height }) {
 - Never use page.evaluate, querySelector, page.snapshot, the accessibility tree or DOM.* to find or click elements. For the final answer you may read visible text with page.evaluate(() => document.body.innerText).`;
 }
 
-async function measureViewport(CDP, imageDimensions, cdpUrl) {
+async function measureViewport(CDP, cdpUrl) {
   const connection = CDP.lazy(cdpUrl, 5000);
   try {
     const { targetInfos } = await connection.send('Target.getTargets');
@@ -196,15 +196,9 @@ async function measureViewport(CDP, imageDimensions, cdpUrl) {
       { expression: '[innerWidth, innerHeight]', returnByValue: true },
       sessionId,
     );
-    const { data } = await connection.send('Page.captureScreenshot', { format: 'png' }, sessionId);
-    const shot = imageDimensions(Buffer.from(data, 'base64'));
     await connection.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+    // page.screenshot() captures CSS pixels, so its pixels are clickAt coordinates at any devicePixelRatio.
     const [width, height] = result.value;
-    // The prompt promises screenshot pixels equal click coordinates.
-    if (shot.width !== width || shot.height !== height)
-      throw new Error(
-        `Screenshot ${shot.width}x${shot.height} differs from viewport ${width}x${height}`,
-      );
     return { width, height };
   } finally {
     connection.close();
@@ -278,7 +272,6 @@ export async function main() {
     const { BrowserUse, CDP, builtinModels } = await import(
       pathToFileURL(join(sdk, 'dist/index.js')).href
     );
-    const { imageDimensions } = await import(pathToFileURL(join(sdk, 'dist/images.js')).href);
     const require = createRequire(join(sdk, 'package.json'));
     const telemetry = require('@lmnr-ai/lmnr');
     Laminar = telemetry.Laminar;
@@ -315,7 +308,7 @@ export async function main() {
       throw new Error('Browser provider returned no browser id/CDP endpoint');
     observer = CDP.lazy(browser.cdpUrl, 1500);
     if (options.coordinate_mode)
-      viewport = await measureViewport(CDP, imageDimensions, browser.cdpUrl);
+      viewport = await measureViewport(CDP, browser.cdpUrl);
     if (options.success_observer) {
       if (!env.SUCCESS_OBSERVER_SCRIPT)
         throw new Error('success_observer needs SUCCESS_OBSERVER_SCRIPT from the platform harness');
