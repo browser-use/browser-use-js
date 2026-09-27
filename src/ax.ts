@@ -60,6 +60,10 @@ export class AxHelpers {
   acted = false;
   /** When the last action's settle began, 0 after a failed action. */
   private actedAt = 0;
+  /** Last change signal per session: a counted DOM change (via the __buChanged binding) or a navigation. */
+  private changed = new Map<string, number>();
+  /** The last probe; it still describes the page until the next change signal on its session. */
+  private seen: Awaited<ReturnType<AxHelpers['probe']>> | undefined;
 
   /** Track in-flight requests per page session from CDP Network events (no page patching). */
   private async trackNetwork(page: Page) {
@@ -83,8 +87,18 @@ export class AxHelpers {
             .catch(() => {});
           return;
         }
+        if (
+          session &&
+          ((method === 'Runtime.bindingCalled' &&
+            (raw as { name: string }).name === '__buChanged') ||
+            (method === 'Page.frameNavigated' &&
+              !(raw as { frame: { parentId?: string } }).frame.parentId) ||
+            method === 'Page.navigatedWithinDocument')
+        )
+          return void this.changed.set(session, Date.now());
         if (method === 'Target.detachedFromTarget') {
           const gone = (raw as { sessionId: string }).sessionId;
+          this.changed.delete(gone);
           this.inflight.delete(gone);
           this.lastNet.delete(gone);
           this.tracked.delete(gone);
@@ -114,24 +128,34 @@ export class AxHelpers {
     const session = page.sessionId || (await page.info().then(() => page.sessionId));
     if (session && !this.tracked.has(session)) {
       this.tracked.add(session);
-      await page.cdp('Network.enable', {}).catch(() => this.tracked.delete(session));
+      await Promise.all([
+        page.cdp('Network.enable', {}),
+        page.cdp('Runtime.addBinding', { name: '__buChanged' }),
+      ]).catch(() => this.tracked.delete(session));
     }
     return session;
   }
 
-  /** URL, title, document identity, a counter of DOM mutations (style aside) and form input/change events. */
-  private probe(page: Page) {
-    return page.evaluate(() => {
+  /**
+   * URL, title, document identity, a counter of DOM mutations (style aside) and form input/change events.
+   * The observer also signals each counted change through the __buChanged binding.
+   */
+  private async probe(page: Page) {
+    const at = Date.now();
+    const result = await page.evaluate(() => {
       const w = window as unknown as {
         __buObs?: MutationObserver;
         __buLast: number;
         __buN: number;
         __buDoc: number;
+        __buChanged?: (payload: string) => void;
       };
       if (!w.__buObs) {
         w.__buLast = performance.now();
         w.__buN = 0;
         w.__buDoc = Math.random();
+        // Count a change and tell the settle loop through the __buChanged binding.
+        const signal = () => (w.__buN++, w.__buChanged?.(''));
         // The action highlight's own overlay is not the page reacting. A style change counts only as the first
         // on its element in 200 ms: a menu shown via style.display is a change, an animation loop goes quiet.
         const own = (n: Node) =>
@@ -158,7 +182,7 @@ export class AxHelpers {
           }
           if (real) {
             w.__buLast = now;
-            w.__buN++;
+            signal();
           }
         });
         w.__buObs.observe(document, {
@@ -168,7 +192,7 @@ export class AxHelpers {
           attributeOldValue: true,
           characterData: true,
         });
-        for (const type of ['input', 'change']) addEventListener(type, () => w.__buN++, true);
+        for (const type of ['input', 'change']) addEventListener(type, signal, true);
       }
       return {
         idle: performance.now() - w.__buLast,
@@ -180,6 +204,17 @@ export class AxHelpers {
         files: !!document.querySelector('input[type=file]'),
       };
     });
+    const probe = { ...result, at, got: Date.now(), session: page.sessionId };
+    this.seen = probe;
+    return probe;
+  }
+
+  /** The last probe if nothing changed on its page since it was sent. */
+  private fresh(page: Page) {
+    const p = this.seen;
+    return p && p.session === page.sessionId && p.at >= (this.changed.get(p.session) ?? 0)
+      ? p
+      : undefined;
   }
 
   /**
@@ -194,7 +229,6 @@ export class AxHelpers {
     const session = await this.trackNetwork(page).catch(() => undefined);
     let limit = cap;
     let pending = 0;
-    let probe: Awaited<ReturnType<AxHelpers['probe']>> | undefined;
     const netBusy = () => {
       const now = Date.now();
       pending = session
@@ -202,22 +236,33 @@ export class AxHelpers {
         : 0;
       return pending > 0 || (session ? now - (this.lastNet.get(session) ?? 0) : quiet) < quiet;
     };
+    const from = options.since || start; // quiet must be observed after this action began
+    let probe = this.fresh(page);
     while (Date.now() - start < limit) {
-      try {
-        probe = await this.probe(page);
+      if (!probe || probe.ready === 'loading') {
+        // Probe a page that changed once it can have been quiet since its last change signal; a new page at once.
+        const wait = quiet - (Date.now() - Math.max(from, this.changed.get(session ?? '') ?? 0));
+        if (this.seen?.session === session && this.seen?.ready !== 'loading' && wait > 0) {
+          await delay(wait);
+          probe = this.fresh(page);
+          continue;
+        }
+        try {
+          probe = await this.probe(page);
+        } catch (error) {
+          // Navigation in progress: wait for the new document. Anything else ends the wait, never the action.
+          if (!isContextLoss(error)) return { why: 'error', pending, ms: Date.now() - start };
+          await delay(40);
+          continue;
+        }
         if (probe.ready === 'loading') limit = Math.max(cap, 3000); // navigations need longer than in-page updates
-        probe.idle = Math.min(probe.idle, Date.now() - (options.since || start)); // quiet must be observed after this action began
-        if (probe.ready !== 'loading' && probe.idle >= quiet && !netBusy())
-          return { why: 'quiet', pending, ms: Date.now() - start, probe };
-      } catch (error) {
-        // Navigation in progress: wait for the new document. Anything else ends the wait, never the action.
-        if (!isContextLoss(error)) return { why: 'error', pending, ms: Date.now() - start };
-        probe = undefined;
       }
-      // Probe again once the DOM can have been quiet for quietMs; wait out in-flight requests here, not in the page.
-      await delay(probe && probe.ready !== 'loading' ? Math.max(20, quiet - probe.idle) : 40);
-      while (probe && probe.idle >= quiet && netBusy() && Date.now() - start < limit)
-        await delay(20);
+      // Without a change signal the page stayed idle since the probe: no need to ask again.
+      const idle = Math.min(probe.idle + Date.now() - probe.got, Date.now() - from);
+      if (probe.ready !== 'loading' && idle >= quiet && !netBusy())
+        return { why: 'quiet', pending, ms: Date.now() - start, probe };
+      await delay(probe.ready === 'loading' ? 40 : Math.max(5, Math.min(20, quiet - idle)));
+      probe = this.fresh(page);
     }
     return { why: 'cap', pending, ms: Date.now() - start };
   }
@@ -525,7 +570,7 @@ export class AxHelpers {
     this.actedAt = 0;
     const page = this.page();
     await this.trackNetwork(page).catch(() => {});
-    const before = await this.probe(page).catch(() => undefined);
+    const before = this.fresh(page) ?? (await this.probe(page).catch(() => undefined));
     let detail: string;
     try {
       detail = await body(page);
@@ -541,10 +586,7 @@ export class AxHelpers {
     return printed(line);
   }
 
-  private async change(
-    before: Awaited<ReturnType<AxHelpers['probe']>> | undefined,
-    after?: Awaited<ReturnType<AxHelpers['probe']>>,
-  ) {
+  private async change(before: typeof this.seen, after?: typeof this.seen) {
     after ??= await this.probe(this.page()).catch(() => undefined);
     if (!before || !after) return 'page changed';
     if (after.doc !== before.doc || after.url !== before.url) return `navigated to ${after.url}`;
