@@ -278,6 +278,7 @@ export class AxHelpers {
       page.info(),
       this.visibleText(page).catch(() => undefined),
       this.fileInputs(page).catch(() => []),
+      page.screenshot({ quality: 50 }).catch(() => undefined), // every state print also shows the viewport
     ]);
     const previous = this.last;
     this.last = new Map();
