@@ -50,6 +50,7 @@ export class AxHelpers {
   ) {}
 
   private inflight = new Map<string, Map<string, number>>();
+  private ignored = new Set<string>();
   private lastNet = new Map<string, number>();
   private tracked = new Set<string>();
   private dialogs: string[] = [];
@@ -90,17 +91,22 @@ export class AxHelpers {
           return;
         }
         if (!session || !method.startsWith('Network.')) return;
-        const params = raw as { requestId: string; type?: string };
+        const params = raw as { requestId: string; type?: string; request?: { url: string } };
         const map = this.inflight.get(session) ?? new Map<string, number>();
         this.inflight.set(session, map);
+        const key = `${session} ${params.requestId}`;
         if (method === 'Network.requestWillBeSent') {
+          // Streams never finish and analytics beacons never change the page: neither holds up the settle.
           if (
-            !['WebSocket', 'EventSource', 'Media', 'Ping', 'Manifest'].includes(params.type ?? '')
+            ['WebSocket', 'EventSource', 'Media', 'Ping', 'Manifest'].includes(params.type ?? '') ||
+            /\/(log|collect|gen_204|generate_204)(\?|$)/.test(params.request?.url ?? '')
           )
-            map.set(params.requestId, Date.now());
-        } else if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed')
+            return void this.ignored.add(key);
+          map.set(params.requestId, Date.now());
+        } else if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
+          if (this.ignored.delete(key)) return;
           map.delete(params.requestId);
-        else return;
+        } else return;
         this.lastNet.set(session, Date.now());
       };
       (cdp as { __buTracked?: boolean }).__buTracked = true;
