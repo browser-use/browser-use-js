@@ -22,8 +22,6 @@ const isContextLoss = (e: unknown) =>
   /Execution context was destroyed|Cannot find context|Cannot find default execution context|Inspected target navigated|Target closed|No frame/.test(
     String(e instanceof Error ? e.message : e),
   );
-const isGone = (e: unknown) =>
-  /No node with given id|Could not find node|Target detached/.test(String(e));
 /** A line the call already printed: the REPL's echo of the returned value stays empty. */
 const printed = (line: string) =>
   Object.defineProperty(new String(line), Symbol.for('nodejs.util.inspect.custom'), {
@@ -34,14 +32,12 @@ const printed = (line: string) =>
 export const AX_PROMPT = `
 
 Ultrafast: the global \`bu\` in the javascript REPL. Each model call costs ~1 s, so chain everything you already know into one javascript call.
-- Look: await page.goto(url); await bu.state() prints the page in order: [id] role "name" = value plus states, ## headings and visible text; * marks ids new since the last look.
+- Look: await page.goto(url); await bu.state() prints the page in order: [id] role "name" = value plus states, ## headings and visible text; * marks ids new since the last look. After a javascript call whose bu actions reached the page, the state is printed automatically.
   Ids are Chrome backendNodeIds: they work in bu.* and in every CDP DOM command.
-- Act: await bu.click(1400); await bu.type(812, 'Zurich'); await bu.type(830, 'Oct 14', {enter: true}). type replaces the field's text; on a <select> it picks the option with that label.
+- Act: await bu.click(1400); await bu.type(812, 'Zurich'); await bu.type(830, 'Oct 14', {enter: true}). type replaces the field's text; on a select it picks the option with that label.
   Each action prints one line: navigated to <url> / page changed / no change. Autocomplete: type, look, then click the suggestion.
-- Element code: await bu.js(1400, (el, arg) => el.innerText, arg) runs on that element in the page and returns the value.
-- Raw: upload await page.cdp('DOM.setFileInputFiles', {backendNodeId: id, files: [path]}); keys await page.cdp('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}) then the same with type 'keyUp'; drag with Input.dispatchMouseEvent mousePressed, mouseMoved, mouseReleased.
-- If a helper fails once, do it raw. Read data with page.evaluate(() => ...).
-- After a javascript call whose bu actions reached the page, the state is printed automatically. Never add blind sleeps (setTimeout): actions and bu.state() wait for the page; look again with bu.state() when results may still be loading.
+- Raw: upload await page.cdp('DOM.setFileInputFiles', {backendNodeId: fileId, files: [await artifact('cv.txt', 'text')]}); keys await page.cdp('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}) then the same with type 'keyUp'; drag with Input.dispatchMouseEvent mousePressed, mouseMoved, mouseReleased.
+- If a helper fails once, do it raw. Read data with page.evaluate(() => ...). Never add blind sleeps (setTimeout): actions and bu.state() wait for the page.
 `;
 
 /** State print and id-based actions on Chrome's accessibility tree. Raw page/CDP stays available. */
@@ -249,7 +245,7 @@ export class AxHelpers {
     }
   }
 
-  /** The page as one list in page order; only the newest print stays in the model's context. */
+  /** The page as one list in page order. */
   async state(options: { max?: number } = {}) {
     const page = this.page();
     this.acted = false; // a look after the last action replaces the automatic print
@@ -293,9 +289,8 @@ export class AxHelpers {
           kids();
           return flush();
         }
-        if (text.at(-1)?.toLowerCase() === name.toLowerCase()) text.pop(); // its label, printed as its name
         flush();
-        const shown = role === 'generic' && prop(n, 'editable') ? 'textbox' : role;
+        if (lines.at(-1)?.toLowerCase() === name.toLowerCase()) lines.pop(); // its label, printed as its name
         const value = norm(n.value?.value);
         const states = [
           prop(n, 'checked') === undefined
@@ -316,6 +311,13 @@ export class AxHelpers {
             ? options.push(norm(c.name?.value))
             : c?.childIds?.forEach((k) => collect(byId.get(k)));
         collect(popup);
+        const shown = popup
+          ? 'select'
+          : role === 'button' && value
+            ? 'file'
+            : role === 'generic' && prop(n, 'editable')
+              ? 'textbox'
+              : role;
         this.last.set(id, { role: shown, name });
         lines.push(
           `${previous.size && !previous.has(id) ? '*' : ''}[${id}] ${shown}${name ? ` "${clip(name, 150)}"` : ''}${value ? ` = ${JSON.stringify(clip(value, 100))}` : ''}${states.length ? ` ${states.join(' ')}` : ''}${options.length ? `  options: ${options.slice(0, 5).join(' | ')}${options.length > 5 ? ` | … ${options.length - 5} more` : ''}` : ''}`,
@@ -333,7 +335,7 @@ export class AxHelpers {
       (t) => t.type === 'page' && t.url !== 'about:blank',
     ).length;
     const header = `[state] ${info.title} | ${info.url}${tabs > 1 ? ` | ${tabs} tabs` : ''}${settled.pending ? ` | loading: ${settled.pending}` : ''}${this.flushDialogs()}`;
-    const max = options.max ?? 8000;
+    const max = options.max ?? 3000;
     const fit = (from: string[], budget: number) => {
       let size = 0;
       const n = from.findIndex((l) => (size += l.length + 1) > budget);
@@ -350,7 +352,9 @@ export class AxHelpers {
         ...lines.slice(lines.length - tail),
       ];
     }
-    this.log(`${header}\n${body.join('\n')}\n[/state]`);
+    const out = `${header}\n${body.join('\n')}\n[/state]`;
+    this.log(out);
+    return printed(out);
   }
 
   private async onNode<T>(page: Page, id: number, fn: string, argument?: unknown): Promise<T> {
@@ -379,39 +383,6 @@ export class AxHelpers {
   private describe(id: number) {
     const n = this.last.get(id);
     return n ? `[${id}] ${n.role}${n.name ? ` "${clip(n.name, 60)}"` : ''}` : `[${id}]`;
-  }
-
-  /** Runs fn on id; when that node is gone (re-rendered), re-finds it once by the role and name of the last print. */
-  private async onLive<T>(page: Page, id: number, fn: (id: number) => Promise<T>) {
-    try {
-      return { id, value: await fn(id), note: '' };
-    } catch (error) {
-      const was = this.last.get(id);
-      if (!isGone(error) || !was) throw error;
-      const nodes = (await this.capture(page)).flatMap((f) => f.nodes).filter((n) => !n.ignored);
-      const same = nodes.filter(
-        (n) =>
-          n.backendDOMNodeId &&
-          String(n.role?.value) === was.role &&
-          norm(n.name?.value) === was.name,
-      );
-      if (same.length !== 1) {
-        const near = nodes.filter((n) => n.backendDOMNodeId && norm(n.name?.value) === was.name);
-        throw new Error(
-          `STALE: ${this.describe(id)} is gone and ${same.length} nodes now match its role and name.${
-            near.length
-              ? ` Candidates: ${near
-                  .slice(0, 5)
-                  .map((n) => `[${n.backendDOMNodeId}] ${n.role?.value} "${clip(was.name, 60)}"`)
-                  .join(', ')}`
-              : ''
-          } Look again with bu.state().`,
-        );
-      }
-      const again = same[0]!.backendDOMNodeId!;
-      this.last.set(again, was);
-      return { id: again, value: await fn(again), note: ` (was [${id}], re-rendered)` };
-    }
   }
 
   /** Scroll into view and return a clickable, unobstructed center point, or throw a precise reason. */
@@ -461,13 +432,13 @@ export class AxHelpers {
   }
 
   /** Runs one action on id and prints one line: navigated to <url> / page changed / no change. */
-  private async act(op: string, id: number, body: (page: Page, id: number) => Promise<string>) {
+  private async act(op: string, id: number, body: (page: Page) => Promise<string>) {
     const page = this.page();
     await this.trackNetwork(page).catch(() => {});
     const before = await this.probe(page).catch(() => undefined);
-    let done: { id: number; value: string; note: string };
+    let detail: string;
     try {
-      done = await this.onLive(page, id, (i) => body(page, i));
+      detail = await body(page);
     } catch (error) {
       throw new Error(
         `${op} ${this.describe(id)} failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -475,7 +446,7 @@ export class AxHelpers {
     }
     this.acted = true;
     await this.settle();
-    const line = `[ok] ${op} ${this.describe(done.id)}${done.value}${done.note} -> ${await this.change(before)}${this.flushDialogs()}`;
+    const line = `[ok] ${op} ${this.describe(id)}${detail} -> ${await this.change(before)}${this.flushDialogs()}`;
     this.log(line);
     return printed(line);
   }
@@ -488,8 +459,8 @@ export class AxHelpers {
   }
 
   async click(id: number) {
-    return this.act('click', id, async (page, i) => {
-      const p = await this.point(page, i);
+    return this.act('click', id, async (page) => {
+      const p = await this.point(page, id);
       await page.clickAt(p.x, p.y);
       return '';
     });
@@ -497,16 +468,16 @@ export class AxHelpers {
 
   async type(id: number, text: string, options: { enter?: boolean } = {}) {
     if (typeof text !== 'string') throw new Error('type needs a string.');
-    return this.act('type', id, async (page, i) => {
+    return this.act('type', id, async (page) => {
       const kind = await this.onNode<{ tag: string; type: string }>(
         page,
-        i,
+        id,
         `function(){const e=this.nodeType===1?this:this.parentElement;if(!e||!e.isConnected)throw Error('Target detached');return {tag:e.tagName,type:e.type||''};}`,
       );
       if (kind.tag === 'SELECT') {
         const label = await this.onNode<string>(
           page,
-          i,
+          id,
           `function(want){
             const n = s => String(s).replace(/\\s+/g,' ').trim().toLowerCase(), opts = [...this.options].filter(o => !o.disabled);
             const o = opts.find(o => n(o.label) === n(want) || n(o.value) === n(want)) ?? opts.find(o => n(o.label).startsWith(n(want)));
@@ -525,21 +496,21 @@ export class AxHelpers {
       ) {
         await this.onNode(
           page,
-          i,
+          id,
           `function(v){const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;s.call(this,v);this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));if(this.value!==v)throw Error('Invalid native date/time value; use its ISO format');}`,
           text,
         );
         return ` = ${JSON.stringify(text)}`;
       }
-      const p = await this.point(page, i, true);
+      const p = await this.point(page, id, true);
       await page.clickAt(p.x, p.y);
       // Comboboxes often move focus to their own overlay input on click; type there, not into the hidden original.
       const moved = await this.onNode<boolean>(
         page,
-        i,
+        id,
         `function(){const e=this.nodeType===1?this:this.parentElement;let a=document.activeElement;while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;return !!a&&a!==e&&!e.contains(a)&&(['INPUT','TEXTAREA'].includes(a.tagName)||a.isContentEditable);}`,
       ).catch(() => false);
-      if (!moved) await page.cdp('DOM.focus', { backendNodeId: i }).catch(() => {});
+      if (!moved) await page.cdp('DOM.focus', { backendNodeId: id }).catch(() => {});
       const a = { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 };
       await page.cdp('Input.dispatchKeyEvent', {
         type: 'rawKeyDown',
@@ -566,36 +537,13 @@ export class AxHelpers {
             })
           : this.onNode<string>(
               page,
-              i,
+              id,
               `function(){const e=this.nodeType===1?this:this.parentElement;return e.isContentEditable?e.innerText:(e.value??'');}`,
             )
       ).catch(() => undefined);
       if (options.enter) await this.key(page, 'Enter', 13, '\r');
       return ` = ${JSON.stringify(clip(text, 60))}${moved ? ' (into the focused overlay input)' : ''}${actual !== undefined && actual !== text ? ` (field now shows ${JSON.stringify(clip(actual, 60))})` : ''}${options.enter ? ' +Enter' : ''}`;
     });
-  }
-
-  /** Runs fn(element, arg) in the page and returns its JSON value; settles and prints a line only if the page changed. */
-  async js(id: number, fn: string | ((el: Element, arg: never) => unknown), arg?: unknown) {
-    const page = this.page();
-    const before = await this.probe(page).catch(() => undefined);
-    const done = await this.onLive(page, id, (i) =>
-      this.onNode<unknown>(
-        page,
-        i,
-        `async function(arg){const el=this.nodeType===1?this:this.parentElement;if(!el||!el.isConnected)throw Error('Target detached');return (${String(fn)})(el,arg);}`,
-        arg,
-      ),
-    );
-    const change = await this.change(before);
-    if (change !== 'no change') {
-      this.acted = true;
-      await this.settle();
-      this.log(
-        `[ok] js ${this.describe(done.id)}${done.note} -> ${await this.change(before)}${this.flushDialogs()}`,
-      );
-    }
-    return done.value;
   }
 
   private async key(page: Page, key: string, keyCode: number, text?: string) {
