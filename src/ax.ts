@@ -172,6 +172,7 @@ export class AxHelpers {
         n: w.__buN,
         doc: w.__buDoc,
         files: !!document.querySelector('input[type=file]'),
+        frames: !!document.querySelector('iframe,frame'),
       };
     });
   }
@@ -255,12 +256,15 @@ export class AxHelpers {
   }
 
   /** AX trees of the main frame and of every same-process child frame (other frames fail and are skipped). */
-  private async capture(page: Page) {
+  private async capture(page: Page, withFrames = true) {
     for (let i = 0; ; i++) {
       try {
+        // No iframe elements: skip the frame tree (a DOM query does not see iframes in shadow roots).
         const [{ nodes }, { frameTree }] = await Promise.all([
           page.cdp('Accessibility.getFullAXTree'),
-          page.cdp('Page.getFrameTree'),
+          withFrames
+            ? page.cdp('Page.getFrameTree')
+            : { frameTree: { childFrames: [] } as unknown as Protocol.Page.FrameTree },
         ]);
         const children: { url: string; id: string }[] = [];
         const walk = (tree: typeof frameTree) =>
@@ -294,7 +298,7 @@ export class AxHelpers {
     const settled = await this.settle({ capMs: 3000, since });
     // The settle probe already has URL and title, and says whether a file input needs looking up.
     const [frames, info, visible, files] = await Promise.all([
-      this.capture(page),
+      this.capture(page, settled.probe?.frames !== false),
       settled.probe ?? page.info(),
       this.visibleText(page).catch(() => undefined),
       settled.probe?.files === false ? [] : this.fileInputs(page).catch(() => []),
