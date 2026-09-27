@@ -80,7 +80,11 @@ export class BrowserRuntime {
       execPath,
       execArgv: ['--max-old-space-size=256'], // Never inherit host loaders/preloads/inspectors.
       // Provider keys stay in the agent process; this is not an OS sandbox.
-      env: process.env.BU_CDP_STATS ? { BU_CDP_STATS: process.env.BU_CDP_STATS } : {},
+      env: Object.fromEntries(
+        ['BU_CDP_STATS', 'BU_SETTLE_DEBUG'].flatMap((k) =>
+          process.env[k] ? [[k, process.env[k]]] : [],
+        ),
+      ),
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
       serialization: 'json', // Node and Bun use different advanced IPC formats.
     });

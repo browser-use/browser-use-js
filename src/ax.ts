@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { appendFileSync } from 'node:fs';
 import type { Protocol } from 'devtools-protocol';
 import type { Page } from './page.js';
 import type { CDP } from './cdp.js';
@@ -60,6 +61,8 @@ export class AxHelpers {
   acted = false;
   /** When the last action's settle began, 0 after a failed action. */
   private actedAt = 0;
+  private dbgReq = new Map<string, { d: string; s: number; e?: number }>();
+  private dbgNet: [number, string, string][] = [];
 
   /** Track in-flight requests per page session from CDP Network events (no page patching). */
   private async trackNetwork(page: Page) {
@@ -91,7 +94,24 @@ export class AxHelpers {
           return;
         }
         if (!session || !method.startsWith('Network.')) return;
-        const params = raw as { requestId: string; type?: string; request?: { url: string } };
+        const params = raw as {
+          requestId: string;
+          type?: string;
+          request?: { url: string; initialPriority?: string };
+        };
+        if (process.env.BU_SETTLE_DEBUG) {
+          // Debug only: what each request is, and the last network events.
+          if (params.request)
+            this.dbgReq.set(params.requestId, {
+              d: `${params.type}/${params.request.initialPriority} ${params.request.url.slice(0, 90)}`,
+              s: Date.now(),
+            });
+          const req = this.dbgReq.get(params.requestId);
+          if (req && (method === 'Network.loadingFinished' || method === 'Network.loadingFailed'))
+            req.e = Date.now();
+          this.dbgNet.push([Date.now(), method.slice(8), req?.d ?? params.requestId]);
+          this.dbgNet.splice(0, this.dbgNet.length - 8);
+        }
         const map = this.inflight.get(session) ?? new Map<string, number>();
         this.inflight.set(session, map);
         const key = `${session} ${params.requestId}`;
@@ -127,6 +147,7 @@ export class AxHelpers {
         __buLast: number;
         __buN: number;
         __buDoc: number;
+        __buDbg?: [number, string][];
       };
       if (!w.__buObs) {
         w.__buLast = performance.now();
@@ -152,9 +173,37 @@ export class AxHelpers {
               r.oldValue === (r.target as Element).getAttribute(r.attributeName)
             )
               continue;
-            if (r.attributeName !== 'style') real = true;
-            else if (now - (styled.get(r.target) ?? -1e9) > 200) real = true;
+            const counted =
+              r.attributeName !== 'style' || now - (styled.get(r.target) ?? -1e9) > 200;
+            if (counted) real = true;
             if (r.attributeName === 'style') styled.set(r.target, now);
+            if (counted) {
+              // Debug only: the last real mutations, as kind and target.
+              const t = r.target as Element;
+              const el = t.nodeType === 1 ? t : t.parentElement;
+              const box = el?.getBoundingClientRect();
+              const inert = (n: Node) =>
+                /^(SCRIPT|STYLE|LINK|META|TITLE|NOSCRIPT|TEMPLATE)$/.test(n.nodeName);
+              const tags = [
+                el && (inert(el) || document.head?.contains(el)) ? 'head' : '',
+                r.type === 'childList' &&
+                Array.from(r.addedNodes)
+                  .concat(Array.from(r.removedNodes))
+                  .every((n) => inert(n) || (n.nodeType === 3 && !n.textContent?.trim()))
+                  ? 'inertkids'
+                  : '',
+                box &&
+                (box.bottom < 0 || box.top > innerHeight || box.right < 0 || box.left > innerWidth)
+                  ? 'off'
+                  : '',
+                box && !box.width && !box.height ? 'zero' : '',
+              ].filter(Boolean);
+              (w.__buDbg ??= []).push([
+                now,
+                `[${tags.join(',')}] ${r.type}${r.attributeName ? `:${r.attributeName}` : ''}${r.type === 'childList' ? ` +${r.addedNodes.length}-${r.removedNodes.length}` : ''} ${el?.tagName ?? '?'}${el?.id ? `#${el.id}` : ''}.${String(el?.className ?? '').slice(0, 30)} ${box ? `${Math.round(box.x)},${Math.round(box.y)} ${Math.round(box.width)}x${Math.round(box.height)}` : ''}`,
+              ]);
+              w.__buDbg.splice(0, w.__buDbg.length - 60);
+            }
           }
           if (real) {
             w.__buLast = now;
@@ -178,6 +227,8 @@ export class AxHelpers {
         n: w.__buN,
         doc: w.__buDoc,
         files: !!document.querySelector('input[type=file]'),
+        dbg: (w.__buDbg ?? []).map(([t, d]) => `${Math.round(performance.now() - t)}ms ago ${d}`),
+        dbgPerf: performance.now(),
       };
     });
   }
@@ -187,6 +238,44 @@ export class AxHelpers {
    * (older than 1.5 s are treated as long-poll/analytics), and no DOM mutation for quietMs. Bounded by capMs.
    */
   async settle(options: { capMs?: number; quietMs?: number; page?: Page; since?: number } = {}) {
+    const t0 = Date.now();
+    const result = await this.settleInner(options);
+    if (process.env.BU_SETTLE_DEBUG) {
+      const now = Date.now();
+      const session = (options.page ?? this.page()).sessionId;
+      const pending = [...(this.inflight.get(session)?.entries() ?? [])]
+        .filter(([, t]) => now - t < 1500)
+        .map(([id, t]) => `${now - t}ms ${this.dbgReq.get(id)?.d ?? id}`);
+      // Requests active during this settle, as start..end ms relative to its start.
+      const reqs = [...this.dbgReq.values()]
+        .filter((r) => r.s <= now && (r.e ?? now) >= t0)
+        .map((r) => `${r.s - t0}..${r.e === undefined ? 'open' : r.e - t0} ${r.d}`);
+      appendFileSync(
+        process.env.BU_SETTLE_DEBUG,
+        `${JSON.stringify({
+          at: new Date(now).toISOString(),
+          cap: options.capMs ?? 800,
+          why: result.why,
+          ms: result.ms,
+          probes: result.probes,
+          domIdle: result.last?.idle,
+          ready: result.last?.ready,
+          url: result.last?.url?.slice(0, 80),
+          netIdle: now - (this.lastNet.get(session) ?? 0),
+          pending: pending.slice(0, 5),
+          reqs,
+          net: this.dbgNet.map(([t, m, d]) => `${now - t}ms ago ${m} ${d}`),
+          lastProbeAt: result.last?.at,
+          muts: result.last?.dbg.filter((m) => parseInt(m) <= now - t0 + 200),
+        })}\n`,
+      );
+    }
+    return result;
+  }
+
+  private async settleInner(
+    options: { capMs?: number; quietMs?: number; page?: Page; since?: number } = {},
+  ) {
     const page = options.page ?? this.page();
     const cap = options.capMs ?? 800;
     const quiet = options.quietMs ?? 80;
@@ -195,6 +284,8 @@ export class AxHelpers {
     let limit = cap;
     let pending = 0;
     let probe: Awaited<ReturnType<AxHelpers['probe']>> | undefined;
+    let last: (Awaited<ReturnType<AxHelpers['probe']>> & { at: number }) | undefined;
+    let probes = 0;
     const netBusy = () => {
       const now = Date.now();
       pending = session
@@ -205,13 +296,16 @@ export class AxHelpers {
     while (Date.now() - start < limit) {
       try {
         probe = await this.probe(page);
+        last = { ...probe, at: Date.now() - start };
+        probes++;
         if (probe.ready === 'loading') limit = Math.max(cap, 3000); // navigations need longer than in-page updates
         probe.idle = Math.min(probe.idle, Date.now() - (options.since || start)); // quiet must be observed after this action began
         if (probe.ready !== 'loading' && probe.idle >= quiet && !netBusy())
-          return { why: 'quiet', pending, ms: Date.now() - start, probe };
+          return { why: 'quiet', pending, ms: Date.now() - start, probe, probes, last };
       } catch (error) {
         // Navigation in progress: wait for the new document. Anything else ends the wait, never the action.
-        if (!isContextLoss(error)) return { why: 'error', pending, ms: Date.now() - start };
+        if (!isContextLoss(error))
+          return { why: 'error', pending, ms: Date.now() - start, probes, last };
         probe = undefined;
       }
       // Probe again once the DOM can have been quiet for quietMs; wait out in-flight requests here, not in the page.
@@ -219,7 +313,7 @@ export class AxHelpers {
       while (probe && probe.idle >= quiet && netBusy() && Date.now() - start < limit)
         await delay(20);
     }
-    return { why: 'cap', pending, ms: Date.now() - start };
+    return { why: 'cap', pending, ms: Date.now() - start, probes, last };
   }
 
   private flushDialogs() {
