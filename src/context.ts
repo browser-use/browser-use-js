@@ -42,18 +42,7 @@ export class RunContext {
   project(messages: AgentMessage[]): AgentMessage[] {
     const body = conversation(messages);
     const projected = this.summary ? [this.summary, ...body.slice(this.covered)] : body;
-    const images = projected.filter(
-      (m) => m.role === 'toolResult' && m.content.some((c) => c.type === 'image'),
-    );
-    const keep = new Set(images.slice(-2));
-    return [
-      ...messages.filter((m) => m.role === 'system'),
-      ...projected.map((m) =>
-        m.role === 'toolResult' && !keep.has(m)
-          ? { ...m, content: m.content.filter((c) => c.type !== 'image') }
-          : m,
-      ),
-    ];
+    return [...messages.filter((m) => m.role === 'system'), ...projected];
   }
   tokens(messages: AgentMessage[], system: string): number {
     messages = conversation(messages);
