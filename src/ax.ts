@@ -55,6 +55,12 @@ export class AxHelpers {
   private dialogs: string[] = [];
   /** Role and name of every id in the last print: marks new ids and names targets in action lines. */
   private last = new Map<number, { role: string; name: string }>();
+  /** The last capture and the page version (document, URL, change counter) it was taken at. */
+  private shot = {
+    key: '',
+    frames: [] as { url: string; nodes: AX[] }[],
+    visible: '' as string | undefined,
+  };
   /** Set by every action; the worker prints the state after that cell. */
   acted = false;
 
@@ -111,7 +117,7 @@ export class AxHelpers {
     return session;
   }
 
-  /** URL, document identity and a counter of DOM mutations (style aside) and form input/change events. */
+  /** URL, title, document identity, a counter of DOM mutations (style aside) and form input/change events. */
   private probe(page: Page) {
     return page.evaluate(() => {
       const w = window as unknown as {
@@ -159,8 +165,10 @@ export class AxHelpers {
         idle: performance.now() - w.__buLast,
         ready: document.readyState,
         url: location.href,
+        title: document.title,
         n: w.__buN,
         doc: w.__buDoc,
+        files: !!document.querySelector('input[type=file]'),
       };
     });
   }
@@ -177,9 +185,10 @@ export class AxHelpers {
     const session = await this.trackNetwork(page).catch(() => undefined);
     let limit = cap;
     let pending = 0;
+    let probe: Awaited<ReturnType<AxHelpers['probe']>> | undefined;
     while (Date.now() - start < limit) {
       try {
-        const probe = await this.probe(page);
+        probe = await this.probe(page);
         const now = Date.now();
         if (probe.ready === 'loading') limit = Math.max(cap, 3000); // navigations need longer than in-page updates
         probe.idle = Math.min(probe.idle, now - start); // quiet must be observed after this action began
@@ -188,7 +197,7 @@ export class AxHelpers {
           : 0;
         const netIdle = session ? now - (this.lastNet.get(session) ?? 0) : quiet;
         if (probe.ready !== 'loading' && probe.idle >= quiet && pending === 0 && netIdle >= quiet)
-          return { why: 'quiet', pending, ms: now - start };
+          return { why: 'quiet', pending, ms: now - start, probe };
       } catch (error) {
         // Navigation in progress: wait for the new document. Anything else ends the wait, never the action.
         if (!isContextLoss(error)) return { why: 'error', pending, ms: Date.now() - start };
@@ -272,12 +281,17 @@ export class AxHelpers {
     const page = this.page();
     this.acted = false; // a look after the last action replaces the automatic print
     const settled = await this.settle({ capMs: 3000 });
-    const [frames, info, visible, files] = await Promise.all([
-      this.capture(page),
-      page.info(),
-      this.visibleText(page).catch(() => undefined),
-      this.fileInputs(page).catch(() => []),
+    const probe = settled.probe;
+    const key = probe ? `${probe.doc} ${probe.url} ${probe.n}` : '';
+    // Same document, URL and change counter as the last capture: the page did not change, so reuse it.
+    const [[frames, visible], info, files] = await Promise.all([
+      key && key === this.shot.key
+        ? ([this.shot.frames, this.shot.visible] as const)
+        : Promise.all([this.capture(page), this.visibleText(page).catch(() => undefined)]),
+      probe ?? page.info(),
+      probe?.files === false ? [] : this.fileInputs(page).catch(() => []),
     ]);
+    this.shot = { key, frames, visible };
     const previous = this.last;
     this.last = new Map();
     const lines: string[] = [];
