@@ -34,6 +34,26 @@ function controlState(node: Protocol.Accessibility.AXNode) {
   return state;
 }
 
+/** Runs in the page: re-checks fn after each DOM change and at least every 100 ms, until truthy or ms pass. */
+const until = async (fn: (arg: unknown) => unknown, arg: unknown, ms: number) => {
+  const end = performance.now() + ms;
+  while (!(await fn(arg))) {
+    if (performance.now() >= end) return false;
+    await new Promise<void>((resolve) => {
+      const done = () => (observer.disconnect(), resolve());
+      const observer = new MutationObserver(done);
+      observer.observe(document, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        characterData: true,
+      });
+      setTimeout(done, 100);
+    });
+  }
+  return true;
+};
+
 /** A tab with explicit CDP, page evaluation and observation. No selector/action layer. */
 export class Page {
   private constructor(
@@ -126,18 +146,25 @@ export class Page {
     const timeoutMs = positiveInteger('timeoutMs', options.timeoutMs ?? this.connection.timeoutMs);
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      // One round trip per wait, not per check; each stays well inside the CDP command timeout.
+      const ms = Math.min(deadline - Date.now(), this.connection.timeoutMs / 2);
       try {
-        if (await this.evaluate(fn, argument)) return;
+        if (
+          await this.evaluate(
+            `(${until})(${fn}, ${JSON.stringify(argument) ?? 'undefined'}, ${ms})`,
+          )
+        )
+          return;
       } catch (error) {
         if (
           !(error instanceof Error) ||
-          !/Execution context was destroyed|Cannot find context|Cannot find default execution context/.test(
+          !/Execution context was destroyed|Cannot find context|Cannot find default execution context|Inspected target navigated/.test(
             error.message,
           )
         )
           throw error;
+        await delay(Math.min(100, Math.max(0, deadline - Date.now())));
       }
-      await delay(Math.min(100, Math.max(0, deadline - Date.now())));
     }
     throw new Error(`Page condition exceeded ${timeoutMs} ms.`);
   }
