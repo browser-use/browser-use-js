@@ -34,6 +34,7 @@ export const AX_PROMPT = `
 Ultrafast: the global \`bu\` in the javascript REPL. Each model call costs ~1 s, so chain everything you already know into one javascript call.
 - Look: await page.goto(url); await bu.state() prints the page in order and returns that text: [id] role "name" = value plus states, ## headings and visible text; * marks ids new since the last look. After a javascript call whose bu actions reached the page, the state is printed automatically.
   Ids are Chrome backendNodeIds: they work in bu.* and in every CDP DOM command.
+- See: when the state doesn't show what you need (canvas, images, charts, colors, layout) or to confirm a visual outcome, await screenshot(); then click by id, or at screenshot pixels with await page.clickAt(x, y).
 - Act: await bu.click(1400); await bu.type(812, 'Zurich'); await bu.type(830, 'Oct 14', {enter: true}). type replaces the field's text. bu.type(id, 'Canada') also picks a native select option; don't click it first.
   Each action prints one line: navigated to <url> / page changed / no change. Autocomplete: type, look, then click the suggestion.
 - Raw: upload to a file line with await page.cdp('DOM.setFileInputFiles', {backendNodeId: id, files: [await artifact('cv.txt', 'text')]}); keys await page.cdp('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}) then the same with type 'keyUp'; drag with Input.dispatchMouseEvent mousePressed, mouseMoved, mouseReleased.
