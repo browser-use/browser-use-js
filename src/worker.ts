@@ -47,6 +47,7 @@ let output = '';
 let images: Image[] = [];
 let captureResponse: CDP['observeResponse'];
 let overflow = false;
+let todos: { content: string; status: string }[] = [];
 // Bound memory even when generated code writes an unbounded amount of output.
 const hardLimit = 1_000_000;
 let pendingText = '';
@@ -210,6 +211,17 @@ Object.assign(realm, {
     return path;
   },
   require: createRequire(join(config.workspace, 'package.json')),
+  // Models know this checklist from coding agents and reach for it inside code.
+  todowrite(list: typeof todos | { todos: typeof todos }) {
+    const next = Array.isArray(list) ? list : list?.todos;
+    const statuses = ['pending', 'in_progress', 'completed', 'cancelled'];
+    if (
+      !Array.isArray(next) ||
+      next.some((t) => typeof t?.content !== 'string' || !statuses.includes(t.status))
+    )
+      throw new Error(`todowrite([{content, status}]) with status ${statuses.join(', ')}.`);
+    todos = next;
+  },
   async screenshot() {
     const current = Reflect.get(realm, 'page') as Page;
     if (images.length >= 4) throw new Error('At most four screenshots per cell.');
@@ -371,8 +383,12 @@ process.on('message', async (message: WorkerRequest) => {
     // Hosts that act on "the tab the user sees" (typing a secret, a live view) follow the agent.
     await browser.send('Target.activateTarget', { targetId }).catch(() => {});
   }
+  const open = todos.filter((t) => t.status === 'pending' || t.status === 'in_progress');
+  const plan = open.length
+    ? `[plan] ${todos.length - open.length}/${todos.length} done. Open: ${open.map((t) => t.content).join('; ')}`
+    : '';
   const result = {
-    text: [output, ...previews.notes].filter(Boolean).join('\n') || '(no output)',
+    text: [output, ...previews.notes, plan].filter(Boolean).join('\n') || '(no output)',
     images: previews.images,
     targetId,
     ...(browser.observationTargetId ? { observationTargetId: browser.observationTargetId } : {}),

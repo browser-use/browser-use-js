@@ -31,7 +31,7 @@ const printed = (line: string) =>
 /** Appended to the system prompt in ultrafast mode. */
 export const AX_PROMPT = `
 
-Ultrafast: the global \`bu\` in the javascript REPL. Each model call costs ~1 s, so chain everything you already know into one javascript call.
+Ultrafast: the global \`bu\` in the javascript REPL. Each model call costs ~1 s, so in each step chain every action you already know into one javascript call. That saves calls, not scope: cover all of what the task asks.
 - Look: await page.goto(url); await bu.state() prints the page in order and returns that text: [id] role "name" = value plus states, ## headings and visible text; * marks ids new since the last look. After a javascript call whose bu actions reached the page, the state is printed automatically.
   Ids are Chrome backendNodeIds: they work in bu.* and in every CDP DOM command.
 - Act: await bu.click(1400); await bu.type(812, 'Zurich'); await bu.type(830, 'Oct 14', {enter: true}). type replaces the field's text. bu.type(id, 'Canada') also picks a native select option; don't click it first.
