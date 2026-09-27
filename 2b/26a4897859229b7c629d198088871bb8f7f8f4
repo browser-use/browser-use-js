@@ -1,0 +1,21 @@
+src/runtime.ts
+  s_cafdfaabed1c36::t_ae8c73c3865024 138-139
+test/ownership.test.mjs
+  s_cafdfaabed1c36::t_71cc8743a32ee4 112-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2b26a4897859229b7c629d198088871bb8f7f8f4",
+  "prompts": {},
+  "sessions": {
+    "s_cafdfaabed1c36": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c3724c29-3783-4440-b876-0e2d1e24e545",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Gregor Žunič <36313686+gregpr07@users.noreply.github.com>"
+    }
+  }
+}
