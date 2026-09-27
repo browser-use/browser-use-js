@@ -1,9 +1,12 @@
 src/cdp.ts
   s_4bd8ed662096a6::t_bd7cf5326a72ff 15-17,232-238,241-244
+  s_4bd8ed662096a6::t_ae4c4d84e132d5 15,17,232-238,242-243
 src/runtime.ts
   s_4bd8ed662096a6::t_20ef3f14c113dc 82-83
+  s_4bd8ed662096a6::t_6dd2b727271b5f 82-83
 src/worker.ts
   s_4bd8ed662096a6::t_086a25909a36bc 10,316-317
+  s_4bd8ed662096a6::t_9d8a6be813c284 10,316-317
 ---
 {
   "schema_version": "authorship/3.0.0",
