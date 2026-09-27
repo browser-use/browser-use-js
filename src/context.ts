@@ -45,7 +45,7 @@ export class RunContext {
     const images = projected.filter(
       (m) => m.role === 'toolResult' && m.content.some((c) => c.type === 'image'),
     );
-    const keep = new Set(images.slice(-2));
+    const keep = new Set(images.slice(-1));
     return [
       ...messages.filter((m) => m.role === 'system'),
       ...projected.map((m) =>
