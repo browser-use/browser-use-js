@@ -23,6 +23,8 @@ export function parseOptions(value) {
     'service_tier',
     'cell_timeout_ms',
     'success_observer',
+    'cloud_worker',
+    'agent_instructions_b64',
   ]);
   if (!value || Array.isArray(value) || typeof value !== 'object')
     throw new Error('options must be an object');
@@ -37,7 +39,7 @@ export function parseOptions(value) {
     cell_timeout_ms: 120000,
     ...value,
   };
-  for (const key of ['semantic', 'coordinate_mode', 'success_observer'])
+  for (const key of ['semantic', 'coordinate_mode', 'success_observer', 'cloud_worker'])
     if (options[key] !== undefined && typeof options[key] !== 'boolean')
       throw new Error(`${key} must be boolean`);
   if (options.semantic && options.coordinate_mode)
@@ -76,6 +78,8 @@ export function parseOptions(value) {
     throw new Error('proxy_country_code must be a lowercase country code or null');
   if (options.evidence_format !== undefined && options.evidence_format !== 'findings')
     throw new Error('evidence_format must be findings when provided');
+  if (options.cloud_worker && typeof options.agent_instructions_b64 !== 'string')
+    throw new Error('cloud_worker needs agent_instructions_b64');
   if (options.research_tools !== undefined && typeof options.research_tools !== 'boolean')
     throw new Error('research_tools must be boolean');
   if (options.delivery_review !== undefined && typeof options.delivery_review !== 'boolean')
@@ -327,13 +331,65 @@ export async function main() {
     }
     const models = builtinModels();
     let deliveryReviewSubmissions = 0;
+    const integrity =
+      'Do not read files outside the output workspace or inspect benchmark source, rubrics, judge code, or credentials. Save requested files in workspace.';
+    const cloudWorker = options.cloud_worker
+      ? {
+          instructions: `${Buffer.from(options.agent_instructions_b64, 'base64').toString('utf8')}\n${integrity}`,
+          researchTools: true,
+          shellEnv: Object.fromEntries(
+            Object.entries(process.env).filter(
+              ([k]) => k === 'PATH' || k === 'V4_GATEWAY_URL' || k === 'V4_RUN_TOKEN',
+            ),
+          ),
+          focusTab: true,
+          browserSwitching: true,
+          dedicatedBrowser: true,
+          shellTimeoutMs: 600_000,
+          telemetry: false,
+          tools: [
+            {
+              name: 'todowrite',
+              label: 'todowrite',
+              description:
+                'Keep a short checklist for multi-step tasks; the user sees it as your plan. Send the whole list each time, with at most one item in_progress.',
+              parameters: require('typebox').Type.Unsafe({
+                properties: {
+                  todos: {
+                    items: {
+                      properties: {
+                        content: { title: 'Content', type: 'string' },
+                        status: {
+                          description: 'pending, in_progress, completed or cancelled',
+                          title: 'Status',
+                          type: 'string',
+                        },
+                      },
+                      required: ['content', 'status'],
+                      title: '_PiTodo',
+                      type: 'object',
+                    },
+                    title: 'Todos',
+                    type: 'array',
+                  },
+                },
+                required: ['todos'],
+                title: '_PiPlan',
+                type: 'object',
+              }),
+              executionMode: 'sequential',
+              execute: async () => ({ content: [{ type: 'text', text: 'Plan updated.' }], details: {} }),
+            },
+          ],
+        }
+      : undefined;
     agent = await BrowserUse.create({
       model,
       models,
       reasoning: options.reasoning_effort,
       browser: { cdpUrl: browser.cdpUrl },
       workspace: outputDir,
-      cellTimeoutMs: options.cell_timeout_ms,
+      ...(cloudWorker ? {} : { cellTimeoutMs: options.cell_timeout_ms }),
       operationTimeoutMs: 20000,
       ...(options.semantic ? { mode: 'ultrafast' } : {}),
       // The platform's search proxy uses the cloud worker's names for the same endpoint.
@@ -367,7 +423,8 @@ export async function main() {
             },
           }
         : {}),
-      instructions: `${options.evidence_format === 'findings' ? 'Use browser UI, public search and source APIs for research; use files/scripts for processing.' : 'Use browser UI and page evaluation for research.'} Do not read files outside the output workspace or inspect benchmark source, rubrics, judge code, or credentials. Save requested files in workspace.${viewport ? `\n${coordinatePrompt(viewport)}` : ''}`,
+      ...cloudWorker,
+      ...(cloudWorker ? {} : { instructions: `${options.evidence_format === 'findings' ? 'Use browser UI, public search and source APIs for research; use files/scripts for processing.' : 'Use browser UI and page evaluation for research.'} Do not read files outside the output workspace or inspect benchmark source, rubrics, judge code, or credentials. Save requested files in workspace.${viewport ? `\n${coordinatePrompt(viewport)}` : ''}` }),
     });
     const findings = options.evidence_format === 'findings';
     const steps = [];
@@ -395,6 +452,7 @@ export async function main() {
           {
             maxSteps: Number(env.EVAL_MAX_STEPS || 35),
             timeoutMs: options.task_timeout_seconds * 1000,
+            ...(options.cloud_worker ? { compaction: true } : {}),
             maxContextChars: options.max_context_chars,
             observerTimeoutMs: 3500,
             async observe(event, signal) {
