@@ -7,10 +7,12 @@ import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { auditedStream } from './audit.mjs';
+import { createPeriodicReasoning } from './periodic-reasoning.mjs';
 
 export function parseOptions(value) {
   const allowed = new Set([
     'reasoning_effort',
+    'periodic_reasoning',
     'max_context_chars',
     'task_timeout_seconds',
     'proxy_country_code',
@@ -85,6 +87,7 @@ export function parseOptions(value) {
     (!Number.isFinite(options.max_model_cost_usd) || options.max_model_cost_usd <= 0)
   )
     throw new Error('Invalid max_model_cost_usd');
+  createPeriodicReasoning(options.periodic_reasoning, options.reasoning_effort);
   return options;
 }
 
@@ -249,6 +252,10 @@ export async function main() {
     const { builtinModels } = await import('@earendil-works/pi-ai/providers/all');
     const models = builtinModels();
     let deliveryReviewSubmissions = 0;
+    const periodicReasoning = createPeriodicReasoning(
+      options.periodic_reasoning,
+      options.reasoning_effort,
+    );
     agent = await BrowserUse.create({
       model,
       mode: options.mode ?? 'default',
@@ -258,6 +265,7 @@ export async function main() {
         modelRequests,
         pendingAccounting,
         options.service_tier,
+        periodicReasoning,
       ),
       reasoning: options.reasoning_effort,
       browser: { cdpUrl: browser.cdpUrl },
@@ -367,6 +375,7 @@ export async function main() {
               }
             },
             async onEvent(event) {
+              periodicReasoning?.onEvent(event);
               if (findings) {
                 if (event.type === 'tool_execution_start')
                   toolInputs.set(event.toolCallId, clipEvidence(JSON.stringify(event.args), 2000));

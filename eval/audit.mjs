@@ -57,7 +57,7 @@ export function contextDelta(previous, current) {
       'SDK estimateTokens, not provider tokenization or guaranteed cache eligibility. Prefix difference may include compaction or other changes.',
   };
 }
-export function auditedStream(streamFn, records, pending, serviceTier) {
+export function auditedStream(streamFn, records, pending, serviceTier, periodicReasoning) {
   // Summary requests have their own prompt; keep them out of successive main-call deltas.
   let previousMain = [];
   return (model, context, options = {}) => {
@@ -89,6 +89,8 @@ export function auditedStream(streamFn, records, pending, serviceTier) {
         record.call_kind = tools.some((t) => ['javascript', 'finish', 'finish_from_js'].includes(t))
           ? 'main'
           : 'auxiliary';
+        if (record.call_kind === 'main' && periodicReasoning)
+          record.periodic_reasoning = periodicReasoning.apply(body);
         if (record.call_kind === 'main' && !record.history_delta) {
           record.history_delta = contextDelta(previousMain, messages);
           previousMain = messages;
