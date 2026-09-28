@@ -25,6 +25,7 @@ export function parseOptions(value) {
     'success_observer',
     'cloud_worker',
     'agent_instructions_b64',
+    'pi_options_b64',
   ]);
   if (!value || Array.isArray(value) || typeof value !== 'object')
     throw new Error('options must be an object');
@@ -78,6 +79,8 @@ export function parseOptions(value) {
     throw new Error('proxy_country_code must be a lowercase country code or null');
   if (options.evidence_format !== undefined && options.evidence_format !== 'findings')
     throw new Error('evidence_format must be findings when provided');
+  if (options.pi_options_b64 !== undefined && typeof options.pi_options_b64 !== 'string')
+    throw new Error('pi_options_b64 must be a base64 JSON string');
   if (options.cloud_worker && typeof options.agent_instructions_b64 !== 'string')
     throw new Error('cloud_worker needs agent_instructions_b64');
   if (options.research_tools !== undefined && typeof options.research_tools !== 'boolean')
@@ -383,6 +386,26 @@ export async function main() {
           ],
         }
       : undefined;
+    // A host config to benchmark: {instructions, options, stub_tools: [{name, description, parameters, reply}], run}.
+    const hostConfig = options.pi_options_b64
+      ? JSON.parse(Buffer.from(options.pi_options_b64, 'base64').toString('utf8'))
+      : undefined;
+    const HOST_KEYS = ['cellTimeoutMs', 'focusTab', 'browserSwitching', 'dedicatedBrowser', 'highlightActions', 'researchTools', 'shellTimeoutMs'];
+    const host = hostConfig
+      ? {
+          ...Object.fromEntries(Object.entries(hostConfig.options ?? {}).filter(([k]) => HOST_KEYS.includes(k))),
+          instructions: `${hostConfig.instructions}\n${integrity}`,
+          telemetry: false,
+          tools: (hostConfig.stub_tools ?? []).map((t) => ({
+            name: t.name,
+            label: t.name,
+            description: t.description,
+            parameters: require('typebox').Type.Unsafe(t.parameters),
+            executionMode: 'sequential',
+            execute: async () => ({ content: [{ type: 'text', text: t.reply }], details: {} }),
+          })),
+        }
+      : undefined;
     agent = await BrowserUse.create({
       model,
       models,
@@ -424,7 +447,8 @@ export async function main() {
           }
         : {}),
       ...cloudWorker,
-      ...(cloudWorker ? {} : { instructions: `${options.evidence_format === 'findings' ? 'Use browser UI, public search and source APIs for research; use files/scripts for processing.' : 'Use browser UI and page evaluation for research.'} Do not read files outside the output workspace or inspect benchmark source, rubrics, judge code, or credentials. Save requested files in workspace.${viewport ? `\n${coordinatePrompt(viewport)}` : ''}` }),
+      ...host,
+      ...(cloudWorker || host ? {} : { instructions: `${options.evidence_format === 'findings' ? 'Use browser UI, public search and source APIs for research; use files/scripts for processing.' : 'Use browser UI and page evaluation for research.'} Do not read files outside the output workspace or inspect benchmark source, rubrics, judge code, or credentials. Save requested files in workspace.${viewport ? `\n${coordinatePrompt(viewport)}` : ''}` }),
     });
     const findings = options.evidence_format === 'findings';
     const steps = [];
@@ -453,6 +477,7 @@ export async function main() {
             maxSteps: Number(env.EVAL_MAX_STEPS || 35),
             timeoutMs: options.task_timeout_seconds * 1000,
             ...(options.cloud_worker ? { compaction: true } : {}),
+            ...(hostConfig?.run?.compaction ? { compaction: true } : {}),
             maxContextChars: options.max_context_chars,
             observerTimeoutMs: 3500,
             async observe(event, signal) {
