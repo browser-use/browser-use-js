@@ -1,0 +1,54 @@
+test/agent.test.mjs
+  s_cafdfaabed1c36::t_223a878f926dc8 619-625,627,629,633
+  s_cafdfaabed1c36::t_2114dad3a1e13d 712-717
+  s_cafdfaabed1c36::t_cc008dcf6c3468 677-679,688
+  s_cafdfaabed1c36::t_c54cd5fc6c57a6 626,628,630-632
+  s_cafdfaabed1c36::t_67b8512a429fa3 755-757
+src/agent.ts
+  s_cafdfaabed1c36::t_ae0f25429afe2b 30-38,40,44-45,49,51,58-59
+  s_cafdfaabed1c36::t_7914a5290fef52 413
+  s_cafdfaabed1c36::t_05438c5105ead8 48
+  s_cafdfaabed1c36::t_8137cf57542b9d 39,41-43,46-47,50,52-57
+src/index.ts
+  s_cafdfaabed1c36::t_7c1fab6dc2cd9c 402
+  s_cafdfaabed1c36::t_dc2d1149a5d1fe 411,423-426
+  s_cafdfaabed1c36::t_4c2e71b106f29d 335
+  s_cafdfaabed1c36::t_c70d2060a006f6 284-286,289-296,298-299,301,306
+  s_cafdfaabed1c36::t_80795c568646e8 272,282,303,322,331
+  s_cafdfaabed1c36::t_b160fcc1de9c60 421
+  s_cafdfaabed1c36::t_5dc104fcfa9c41 372
+  s_cafdfaabed1c36::t_4d203ce447631e 385-388
+  s_cafdfaabed1c36::t_eacdc55d54af1b 271,273-281,283,287-288,297,302,304-305,307-308
+  s_cafdfaabed1c36::t_6f71483a32d432 1
+  s_cafdfaabed1c36::t_0163d09a3ed2d6 412-414,422
+  s_cafdfaabed1c36::t_361bb988bde247 332
+test/sessions.test.mjs
+  s_cafdfaabed1c36::t_17c588435c246e 451-452
+  s_cafdfaabed1c36::t_9071bba5a4d5db 298-299
+  s_cafdfaabed1c36::t_3ba9cadff50c71 368,373,385
+  s_cafdfaabed1c36::t_bcc0a51d6756a0 415,426
+  s_cafdfaabed1c36::t_5228aab4909175 297,300-302,304,313-324,326-335,337-345,347-350,352-358,369,375,386-387,397-398,403,406-414,416-425,427-440,449-450,454-458,461-463
+  s_cafdfaabed1c36::t_18b3442f7766c4 346,351
+  s_cafdfaabed1c36::t_96eb2b7c9862fe 303,305-312
+  s_cafdfaabed1c36::t_bfb5f1c1cc101a 325,336
+  s_cafdfaabed1c36::t_920a7fcd97af46 3
+  s_cafdfaabed1c36::t_226d5385730486 441-448,453,459-460
+  s_cafdfaabed1c36::t_50191607c1eb3b 359-367,370-372,374,376-384,388-396,399-402,404-405,464-468
+  s_cafdfaabed1c36::t_2a3799e8a877f2 13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1dd42cb5d2e8a8725905f6056f0bc2691054278d",
+  "prompts": {},
+  "sessions": {
+    "s_cafdfaabed1c36": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c3724c29-3783-4440-b876-0e2d1e24e545",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
