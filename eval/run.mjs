@@ -469,9 +469,19 @@ export async function main() {
                           .slice(0, 4000),
                       ),
                   );
-                if (turns <= (schedule.first ?? 0) || obstacle) {
+                const periodic = schedule.every && (turns - 1) % schedule.every === 0;
+                if (turns <= (schedule.first ?? 0) || obstacle || periodic) {
                   scheduled++;
                   streamOptions = { ...streamOptions, reasoning: schedule.reasoning };
+                  // Sent with this request only, so later requests keep the cached prefix.
+                  if (schedule.note)
+                    context = {
+                      ...context,
+                      messages: [
+                        ...context.messages,
+                        { role: 'user', content: [{ type: 'text', text: schedule.note }], timestamp: Date.now() },
+                      ],
+                    };
                 }
               }
               const first = send(streamOptions);
