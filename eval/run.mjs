@@ -393,6 +393,12 @@ export async function main() {
     // Re-ask run-ending turns at this effort, at most max times per run.
     const escalate = hostConfig?.escalate_on_end;
     let escalations = 0;
+    // Higher effort for the first N turns and for the turn after an obstacle.
+    const schedule = hostConfig?.effort_schedule;
+    let turns = 0;
+    let scheduled = 0;
+    const OBSTACLE =
+      /\b(4\d\d|5\d\d)\b (error|forbidden|not found|unauthorized|too many)|status[: ]+(4\d\d|5\d\d)|<!doctype html|<html|unusual traffic|captcha|access denied|are you a robot|^\s*\[\]\s*$|no results found|Cell exceeded|TypeError|ReferenceError|SyntaxError|Error:/im;
     const HOST_KEYS = ['cellTimeoutMs', 'focusTab', 'browserSwitching', 'dedicatedBrowser', 'highlightActions', 'researchTools', 'shellTimeoutMs'];
     const host = hostConfig
       ? {
@@ -431,7 +437,7 @@ export async function main() {
             },
           }
         : {}),
-      ...(options.service_tier || escalate
+      ...(options.service_tier || escalate || schedule
         ? {
             streamFn: async (m, context, streamOptions) => {
               // streamSimple drops serviceTier, so set it on the request body.
@@ -447,6 +453,27 @@ export async function main() {
                       }
                     : {}),
                 });
+              if (schedule && !streamOptions?.toolChoice) {
+                turns++;
+                const last = (context.messages ?? []).slice(-3).filter((m) => m.role === 'toolResult');
+                const obstacle =
+                  schedule.after_obstacle &&
+                  last.some(
+                    (m) =>
+                      m.isError ||
+                      OBSTACLE.test(
+                        (m.content ?? [])
+                          .filter((c) => c.type === 'text')
+                          .map((c) => c.text)
+                          .join('\n')
+                          .slice(0, 4000),
+                      ),
+                  );
+                if (turns <= (schedule.first ?? 0) || obstacle) {
+                  scheduled++;
+                  streamOptions = { ...streamOptions, reasoning: schedule.reasoning };
+                }
+              }
               const first = send(streamOptions);
               // Delivery-only turns (toolChoice set) cannot continue work, so they are never re-asked.
               if (!escalate || escalations >= escalate.max || streamOptions?.toolChoice) return first;
@@ -700,6 +727,7 @@ export async function main() {
           await readFile(join(workspace, 'dependencies.sha256'), 'utf8')
         ).trim(),
         escalations,
+        scheduled_turns: scheduled,
         screenshot_errors: screenshotErrors,
         screenshot_time_ms: screenshotTimeMs,
         screenshot_detach_errors: screenshotDetachErrors,
