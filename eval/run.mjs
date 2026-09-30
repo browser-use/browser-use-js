@@ -390,11 +390,18 @@ export async function main() {
     const hostConfig = options.pi_options_b64
       ? JSON.parse(Buffer.from(options.pi_options_b64, 'base64').toString('utf8'))
       : undefined;
+    // Re-ask run-ending turns at this effort, at most max times per run.
+    const escalate = hostConfig?.escalate_on_end;
+    let escalations = 0;
     const HOST_KEYS = ['cellTimeoutMs', 'focusTab', 'browserSwitching', 'dedicatedBrowser', 'highlightActions', 'researchTools', 'shellTimeoutMs'];
     const host = hostConfig
       ? {
           ...Object.fromEntries(Object.entries(hostConfig.options ?? {}).filter(([k]) => HOST_KEYS.includes(k))),
-          instructions: `${hostConfig.instructions}\n${integrity}`,
+          instructions: `${hostConfig.instructions}\n${
+            hostConfig.budget_note
+              ? `Budget for this task: up to ${Number(env.EVAL_MAX_STEPS || 35)} model calls and ${Math.round(options.task_timeout_seconds / 60)} minutes.\n`
+              : ''
+          }${integrity}`,
           telemetry: false,
           tools: (hostConfig.stub_tools ?? []).map((t) => ({
             name: t.name,
@@ -424,17 +431,44 @@ export async function main() {
             },
           }
         : {}),
-      ...(options.service_tier
+      ...(options.service_tier || escalate
         ? {
-            // streamSimple drops serviceTier, so set it on the request body.
-            streamFn: (m, context, streamOptions) =>
-              models.streamSimple(m, context, {
-                ...streamOptions,
-                onPayload: async (payload, requestModel) => ({
-                  ...((await streamOptions?.onPayload?.(payload, requestModel)) ?? payload),
-                  service_tier: options.service_tier,
-                }),
-              }),
+            streamFn: async (m, context, streamOptions) => {
+              // streamSimple drops serviceTier, so set it on the request body.
+              const send = (opts) =>
+                models.streamSimple(m, context, {
+                  ...opts,
+                  ...(options.service_tier
+                    ? {
+                        onPayload: async (payload, requestModel) => ({
+                          ...((await opts?.onPayload?.(payload, requestModel)) ?? payload),
+                          service_tier: options.service_tier,
+                        }),
+                      }
+                    : {}),
+                });
+              const first = send(streamOptions);
+              // Delivery-only turns (toolChoice set) cannot continue work, so they are never re-asked.
+              if (!escalate || escalations >= escalate.max || streamOptions?.toolChoice) return first;
+              const message = await first.result();
+              const calls = (message.content ?? []).filter((c) => c.type === 'toolCall');
+              const ends =
+                message.stopReason === 'stop'
+                  ? calls.length === 0
+                  : calls.some((c) => c.name === 'finish' || c.name === 'finish_from_js');
+              if (!ends) return first;
+              // A turn that would end the run is decided again at higher effort; its tokens stay billed.
+              escalations++;
+              const second = send({ ...streamOptions, reasoning: escalate.reasoning });
+              const replacement = await second.result();
+              if (replacement.usage && message.usage) {
+                for (const k of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens'])
+                  replacement.usage[k] = (replacement.usage[k] ?? 0) + (message.usage[k] ?? 0);
+                for (const k of Object.keys(message.usage.cost ?? {}))
+                  replacement.usage.cost[k] = (replacement.usage.cost[k] ?? 0) + (message.usage.cost[k] ?? 0);
+              }
+              return second;
+            },
           }
         : {}),
       researchTools: options.research_tools ?? options.evidence_format === 'findings',
@@ -665,6 +699,7 @@ export async function main() {
         dependency_lock_sha256: (
           await readFile(join(workspace, 'dependencies.sha256'), 'utf8')
         ).trim(),
+        escalations,
         screenshot_errors: screenshotErrors,
         screenshot_time_ms: screenshotTimeMs,
         screenshot_detach_errors: screenshotDetachErrors,
