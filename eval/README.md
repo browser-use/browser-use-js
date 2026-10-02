@@ -41,3 +41,29 @@ These use synthetic data and real local Chrome. The findings test checks that th
 The 106-task regression is frozen at SDK `413ed34`, platform `ddc48ee`, GPT-5.5 medium and Laith/GPT-5.5, with the historical 1,700-second budget. The findings adapter changes are excluded from that run.
 
 The new Luna xhigh cohort uses the same SDK runtime, a 3,600-second budget, a 70-minute browser, 1,000 model turns, an 800,000-character context guard, and findings/Luna xhigh. Dataset and judge code are byte-identical to the 60-task Astra comparison. The existing BrowserCode Luna xhigh result is a historical reference, not a simultaneous control. Browser provisioning, runner, agent tools, context handling and screenshot collection differ between harnesses. Compare end-to-end systems; do not attribute the entire difference to one tool or model.
+
+## BU3 matched-harness adapter mode
+
+The optional bu3_protocol=true mode changes only this evaluation adapter.
+It requires Luna and findings evidence with a3600-second wall budget including
+provisioning, Cloud V2 POST {}, and a32000-token response ceiling through Pi's
+existing streamFn hook. Native near-context cap reductions remain recorded.
+Pi's exact SDK0.87.1 catalog maps off to literal Responses none; low through
+max map identically. The adapter checks the actual serialized effort and model
+before sending. It never substitutes a rejected effort.
+
+model-http-attempts.json preserves every provider HTTP attempt and returned
+usage (including error/unknown usage); model-sdk-calls.jsonl includes auxiliary
+compaction and retry calls. SDK aggregate and wire usage overlap and must not
+be added together. model-catalog.json pins the exact pricing/effort entry.
+Agent runtime src/*, tools, prompts, retry and context behavior are unchanged.
+
+BU3 mode requires no Laminar credential and does not import or initialize its
+executor tracer. Normal evaluation mode retains existing tracing. SDK receipt
+writes are awaited before result export; early failures list only created files.
+
+Receipt settlement waits at most one second after the native deadline. Pending
+SDK results and missing usage remain explicit unknown liabilities; late callbacks
+cannot rewrite sealed evidence. Native screenshot coalescing remains unchanged;
+BU3 frames bind to immutable tool-call trajectory indices, with missing captures
+reported as evidence gaps.

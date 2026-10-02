@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createAudit, auditedStream, nativeEffort } from './bu3-audit.mjs';
 
 export function parseOptions(value) {
   const allowed = new Set([
@@ -18,6 +19,7 @@ export function parseOptions(value) {
     'evidence_format',
     'research_tools',
     'delivery_review',
+    'bu3_protocol',
   ]);
   if (!value || Array.isArray(value) || typeof value !== 'object')
     throw new Error('options must be an object');
@@ -31,7 +33,17 @@ export function parseOptions(value) {
     browser_timeout_minutes: 60,
     ...value,
   };
-  if (!['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(options.reasoning_effort))
+  if (options.bu3_protocol !== undefined && options.bu3_protocol !== true)
+    throw new Error('bu3_protocol must be true');
+  if (options.bu3_protocol) {
+    nativeEffort(options.reasoning_effort);
+    if (options.task_timeout_seconds !== 3600 || options.evidence_format !== 'findings')
+      throw new Error('BU3 requires 3600s and findings evidence');
+  }
+  if (
+    !options.bu3_protocol &&
+    !['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(options.reasoning_effort)
+  )
     throw new Error('Invalid reasoning_effort');
   if (
     !Number.isSafeInteger(options.max_context_chars) ||
@@ -51,7 +63,10 @@ export function parseOptions(value) {
     options.browser_timeout_minutes > 240
   )
     throw new Error('browser_timeout_minutes must be 1..240');
-  if (options.browser_timeout_minutes * 60 <= options.task_timeout_seconds + 30)
+  if (
+    !options.bu3_protocol &&
+    options.browser_timeout_minutes * 60 <= options.task_timeout_seconds + 30
+  )
     throw new Error('Browser lifetime must exceed task timeout plus 30 seconds');
   if (options.proxy_country_code !== null && !/^[a-z]{2}$/.test(options.proxy_country_code))
     throw new Error('proxy_country_code must be a lowercase country code or null');
@@ -102,7 +117,7 @@ export function resultEnvelope(run, artifacts, metadata) {
       finish_repairs: run.finishRepairs,
       compactions: run.compactions ?? 0,
       provider_retries: run.providerRetries ?? 0,
-      max_output_tokens: 32768,
+      max_output_tokens: metadata.options?.bu3_protocol ? 32000 : 32768,
       warnings: run.warnings ?? [],
       usage: run.usage,
       model: run.model,
@@ -154,7 +169,9 @@ export async function main() {
   const env = process.env;
   const workspace = resolve(env.EVAL_WORKSPACE);
   const resultPath = resolve(env.EVAL_RESULT_PATH);
-  let browser, agent, observer, Laminar, root;
+  let browser, agent, observer, Laminar, root, audit;
+  let bu3 = false;
+  const wallStarted = Date.now();
   const spans = new Map();
   let modelSpan;
   let envelope = {
@@ -168,7 +185,7 @@ export async function main() {
   };
   const cleanupErrors = [];
   const cloudRequest = async (path, method, body) => {
-    const response = await fetch(`https://api.browser-use.com/api/v3${path}`, {
+    const response = await fetch(`https://api.browser-use.com/api/${bu3 ? 'v2' : 'v3'}${path}`, {
       method,
       headers: {
         'X-Browser-Use-API-Key': env.BROWSER_USE_API_KEY,
@@ -183,26 +200,34 @@ export async function main() {
   };
   try {
     const options = parseOptions(JSON.parse(env.EVAL_OPTIONS_JSON || '{}'));
+    bu3 = options.bu3_protocol === true;
+    if (bu3 && env.EVAL_MODEL !== 'gpt-5.6-luna')
+      throw new Error('BU3 Pi adapter supports exact Luna only');
     if (Number(env.EVAL_TIMEOUT_MINUTES) * 60 < options.task_timeout_seconds + 90)
       throw new Error('Platform timeout must exceed task timeout by at least 90 seconds');
-    if (!env.EVAL_MODEL_API_KEY || !env.BROWSER_USE_API_KEY || !env.LMNR_PROJECT_API_KEY)
-      throw new Error('Model, browser, and Laminar credentials are required');
+    if (!env.EVAL_MODEL_API_KEY || !env.BROWSER_USE_API_KEY || (!bu3 && !env.LMNR_PROJECT_API_KEY))
+      throw new Error('Model/browser credentials required; non-BU3 also requires Laminar');
     const task = JSON.parse(await readFile(env.EVAL_TASK_PATH, 'utf8'));
     const sdk = resolve(env.EVAL_TARGET_DIR);
-    const { BrowserUse, CDP } = await import(pathToFileURL(join(sdk, 'dist/index.js')).href);
-    const require = createRequire(join(sdk, 'package.json'));
-    const telemetry = require('@lmnr-ai/lmnr');
-    Laminar = telemetry.Laminar;
-    const A = telemetry.LaminarAttributes;
-    Laminar.initialize({
-      projectApiKey: env.LMNR_PROJECT_API_KEY,
-      instrumentModules: {},
-    });
-    root = Laminar.startSpan({
-      name: 'pi.browser_use_next',
-      parentSpanContext: env.LMNR_SPAN_CONTEXT,
-      input: { task, options, model: env.EVAL_MODEL },
-    });
+    const { BrowserUse, CDP, builtinModels } = await import(
+      pathToFileURL(join(sdk, 'dist/index.js')).href
+    );
+    let A = {};
+    if (!bu3) {
+      const require = createRequire(join(sdk, 'package.json'));
+      const telemetry = require('@lmnr-ai/lmnr');
+      Laminar = telemetry.Laminar;
+      A = telemetry.LaminarAttributes;
+      Laminar.initialize({
+        projectApiKey: env.LMNR_PROJECT_API_KEY,
+        instrumentModules: {},
+      });
+      root = Laminar.startSpan({
+        name: 'pi.browser_use_next',
+        parentSpanContext: env.LMNR_SPAN_CONTEXT,
+        input: { task, options, model: env.EVAL_MODEL },
+      });
+    }
     const outputDir = join(workspace, 'agent_outputs');
     // Evaluator captures are not agent deliverables. Workspace cleanup must not
     // delete already-recorded images that the judge will read after the run.
@@ -212,23 +237,50 @@ export async function main() {
     if (!model.startsWith('openai/'))
       throw new Error('This eval adapter currently maps EVAL_MODEL_API_KEY to OpenAI only');
     env.OPENAI_API_KEY = env.EVAL_MODEL_API_KEY;
-    browser = await cloudRequest('/browsers', 'POST', {
-      timeout: options.browser_timeout_minutes,
-      proxyCountryCode: options.proxy_country_code,
-      browserScreenWidth: 1440,
-      browserScreenHeight: 900,
-      enableRecording: false,
-      ...(options.browser_allow_resizing === undefined
+    browser = await cloudRequest(
+      '/browsers',
+      'POST',
+      bu3
         ? {}
-        : { allowResizing: options.browser_allow_resizing }),
-    });
+        : {
+            timeout: options.browser_timeout_minutes,
+            proxyCountryCode: options.proxy_country_code,
+            browserScreenWidth: 1440,
+            browserScreenHeight: 900,
+            enableRecording: false,
+            ...(options.browser_allow_resizing === undefined
+              ? {}
+              : { allowResizing: options.browser_allow_resizing }),
+          },
+    );
     if (!browser.id || !browser.cdpUrl)
       throw new Error('Browser provider returned no browser id/CDP endpoint');
     observer = CDP.lazy(browser.cdpUrl, 1500);
+    if (bu3)
+      await writeFile(
+        join(workspace, 'cloud-browser.json'),
+        JSON.stringify({
+          id: browser.id,
+          api: 'v2',
+          creation_payload: {},
+          timeoutAt: browser.timeoutAt,
+        }),
+      );
+    const models = bu3 ? builtinModels() : undefined;
+    if (bu3) {
+      audit = createAudit(workspace);
+      await writeFile(
+        join(workspace, 'model-catalog.json'),
+        JSON.stringify(models.getModel('openai', 'gpt-5.6-luna'), null, 2),
+      );
+    }
     let deliveryReviewSubmissions = 0;
     agent = await BrowserUse.create({
       model,
-      reasoning: options.reasoning_effort,
+      reasoning: bu3 ? nativeEffort(options.reasoning_effort) : options.reasoning_effort,
+      ...(bu3
+        ? { models, streamFn: auditedStream(models, audit, workspace), telemetry: false }
+        : {}),
       browser: { cdpUrl: browser.cdpUrl },
       workspace: outputDir,
       cellTimeoutMs: 120000,
@@ -247,6 +299,7 @@ export async function main() {
     const findings = options.evidence_format === 'findings';
     const steps = [];
     const toolInputs = new Map();
+    const toolStepIndices = new Map();
     const judgeScreenshots = [];
     const judgeScreenshotSteps = [];
     let screenshotIndex = 0;
@@ -262,20 +315,34 @@ export async function main() {
             : value,
         ),
       );
-    const run = await Laminar.withSpan(
+    const withSpan = bu3 ? (_root, callback) => callback() : Laminar.withSpan.bind(Laminar);
+    const run = await withSpan(
       root,
       () =>
         agent.run(
           `${task.confirmed_task}${task.website ? `\nStarting website: ${task.website}` : ''}`,
           {
             maxSteps: Number(env.EVAL_MAX_STEPS || 35),
-            timeoutMs: options.task_timeout_seconds * 1000,
+            timeoutMs: bu3
+              ? Math.max(1, options.task_timeout_seconds * 1000 - (Date.now() - wallStarted))
+              : options.task_timeout_seconds * 1000,
             maxContextChars: options.max_context_chars,
             observerTimeoutMs: 3500,
             async observe(event, signal) {
               if (event.type !== 'tool_execution_end' || event.toolName !== 'javascript') return;
               if (signal.aborted) return;
-              const stepAtRequest = steps.length;
+              const stepAtRequest = bu3 ? toolStepIndices.get(event.toolCallId) : steps.length;
+              if (
+                bu3 &&
+                (!Number.isInteger(stepAtRequest) || judgeScreenshotSteps.includes(stepAtRequest))
+              ) {
+                screenshotErrors++;
+                screenshotErrorDetails.push({
+                  tool_call_id: event.toolCallId,
+                  message: 'Missing or duplicate immutable trajectory mapping',
+                });
+                return;
+              }
               const connection = observer;
               const abort = () => connection.close();
               signal.addEventListener('abort', abort, { once: true });
@@ -343,6 +410,8 @@ export async function main() {
                     `${event.toolName}: ${toolInputs.get(event.toolCallId) ?? ''}\nresult: ${clipEvidence(JSON.stringify(clean(event.result)), 20000)}`,
                   );
                   toolInputs.delete(event.toolCallId);
+                  if (bu3 && event.toolName === 'javascript')
+                    toolStepIndices.set(event.toolCallId, steps.length);
                 }
                 if (event.type === 'message_end' && event.message.role === 'assistant')
                   for (const part of event.message.content)
@@ -358,7 +427,7 @@ export async function main() {
                   join(workspace, 'events.jsonl'),
                   JSON.stringify(clean(event)) + '\n',
                 );
-              if (event.type === 'turn_start')
+              if (event.type === 'turn_start' && Laminar)
                 modelSpan = Laminar.startSpan({
                   name: 'pi.model',
                   spanType: 'LLM',
@@ -387,7 +456,7 @@ export async function main() {
                 modelSpan.end();
                 modelSpan = undefined;
               }
-              if (event.type === 'tool_execution_start')
+              if (event.type === 'tool_execution_start' && Laminar)
                 spans.set(
                   event.toolCallId,
                   Laminar.startSpan({
@@ -418,6 +487,11 @@ export async function main() {
         ),
       false,
     );
+    if (bu3) {
+      await audit.flush();
+      run.agentDurationMs = run.durationMs;
+      run.durationMs = Date.now() - wallStarted;
+    }
     let findingsEvidence = {};
     if (findings) {
       const evidencePath = join(workspace, 'findings-evidence.json');
@@ -459,6 +533,21 @@ export async function main() {
         screenshot_detach_errors: screenshotDetachErrors,
         screenshot_error_details: screenshotErrorDetails,
         retries: 0,
+        ...(bu3
+          ? {
+              agent_duration_ms: run.agentDurationMs,
+              wall_clock_includes_provisioning: true,
+              wire_attempts: audit.rows.length,
+              screenshot_tool_steps: Object.fromEntries(toolStepIndices),
+              screenshot_capture_policy:
+                'Native asynchronous observer; immutable tool-call step binding, coalesced or failed captures remain gaps',
+              usage_source: 'model-http-attempts.json; SDK usage overlaps, not additive',
+              effort_mapping:
+                options.reasoning_effort === 'none'
+                  ? 'Pi off maps to literal Responses none'
+                  : 'identity',
+            }
+          : {}),
         delivery_review_submissions: deliveryReviewSubmissions,
       },
     );
@@ -467,6 +556,21 @@ export async function main() {
     envelope.metadata.failure_class = 'harness-or-provider';
     console.error(error.message);
   } finally {
+    if (audit) {
+      try {
+        envelope.metadata.audit_settlement = await audit.flush({ close: true });
+      } catch (error) {
+        envelope.metadata.audit_settlement = { error_type: error.name, unknown_usage: true };
+        cleanupErrors.push('Audit receipt settlement failed');
+      }
+      envelope.artifacts.push(
+        'model-http-attempts.json',
+        'model-sdk-calls.jsonl',
+        'cloud-browser.json',
+        'model-catalog.json',
+        'model-sdk-pending.json',
+      );
+    }
     modelSpan?.end();
     for (const span of spans.values()) span.end();
     try {
@@ -494,6 +598,18 @@ export async function main() {
     } catch (error) {
       envelope.metadata.sdk_audit_archive_error = error.message;
       console.error(`SDK audit archive unavailable: ${error.message}`);
+    }
+    if (bu3) {
+      const existing = [];
+      for (const artifact of new Set(envelope.artifacts)) {
+        try {
+          if ((await lstat(join(workspace, artifact))).isFile()) existing.push(artifact);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+      }
+      envelope.artifacts = existing;
+      envelope.metadata.agent_tracing = false;
     }
     await writeFile(resultPath, JSON.stringify(envelope, null, 2) + '\n');
     if (root) {

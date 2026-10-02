@@ -10,5 +10,5 @@ sha256sum "$sdk_dir/package-lock.json" | cut -d ' ' -f 1 > "$EVAL_WORKSPACE/depe
 # Findings evidence uses the same pinned workbook/PDF renderers as the bcode baseline.
 if python3 -c 'import json,os,sys; sys.exit(json.loads(os.environ.get("EVAL_OPTIONS_JSON") or "{}").get("evidence_format") != "findings")'; then
   uv venv "$EVAL_WORKSPACE/.venv"
-  uv pip install --python "$EVAL_WORKSPACE/.venv/bin/python" "openpyxl==3.1.5" "pypdf==6.14.2"
+  uv pip install --python "$EVAL_WORKSPACE/.venv/bin/python" "openpyxl==3.1.5" "pypdf==6.16.2" "et-xmlfile==2.0.0"
 fi
