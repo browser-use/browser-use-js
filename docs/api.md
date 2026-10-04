@@ -68,7 +68,7 @@ Custom `tools` use upstream Pi’s `AgentTool` interface. Hooks are application 
 
 Every result includes status, text, steps, duration, usage, model and workspace. Successful results additionally contain `output`. Saved history, event and recording paths are returned when available. Inspect `warnings` for auxiliary failures.
 
-Stop statuses: `max_steps`, `timeout`, `cancelled`, `cost_limit`, `context_limit`, `incomplete`, `error`. Automatic compaction summarizes older context; saved observations remain in the workspace. A failed summary preserves the original context and can stop at the limit. Recovery never replays browser actions. See [browser primitives](./browser.md) for worker reset behavior.
+Stop statuses: `max_steps`, `timeout`, `cancelled`, `cost_limit`, `context_limit`, `incomplete`, `error`. Screenshot messages stay unchanged between compactions so new images do not rewrite the provider's cacheable prefix. Retained images still count toward context limits. Automatic compaction summarizes older context; saved observations remain in the workspace. Compacted images are stored privately under `.browser-use/context` with paths in the evidence archive; opt into `researchTools` (or supply an image-capable file tool) to reread them. These files are excluded from deliverables. Provider cache reuse is not guaranteed. A failed summary preserves the original context and can stop at the limit. Recovery never replays browser actions. See [browser primitives](./browser.md) for worker reset behavior.
 
 ## Keep results when a limit is reached
 
