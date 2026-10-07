@@ -4,7 +4,14 @@ import {
   type AgentTool,
   type StreamFn,
 } from '@earendil-works/pi-agent-core';
-import type { Model, Api, ToolChoice, Usage } from '@earendil-works/pi-ai';
+import {
+  validateToolArguments,
+  type Model,
+  type Api,
+  type ToolChoice,
+  type ToolCall,
+  type Usage,
+} from '@earendil-works/pi-ai';
 import { Type, type TSchema } from 'typebox';
 import { Check, Errors } from 'typebox/value';
 import { CellError, type BrowserRuntime } from './runtime.js';
@@ -152,10 +159,22 @@ export async function runAgent(
       };
     },
   };
+  const rejectedDelivery = (reason: string, rejected: unknown) => {
+    let value: string | undefined;
+    try {
+      value = JSON.stringify(rejected);
+    } catch {
+      value = '[Non-JSON value; provide a JSON-serializable result.]';
+    }
+    return new Error(
+      `Final delivery rejected: ${reason}\nOriginal result schema: ${JSON.stringify(schema)}\nRejected value or arguments: ${value}\nFor finish, put every result field inside the single result property: {"result": <value matching the schema>}. For finish_from_js, return that value directly. Repair this delivery in the current session; do not repeat completed browser actions.`,
+    );
+  };
   const acceptResult = async (output: unknown, signal?: AbortSignal) => {
     if (!Check(schema, output))
-      throw new Error(
+      throw rejectedDelivery(
         `Final result does not match schema: ${JSON.stringify(Errors(schema, output).slice(0, 5)).slice(0, 2000)}`,
+        output,
       );
     if (config.validateResult) {
       const feedback = await bounded(
@@ -163,7 +182,7 @@ export async function runAgent(
         hookTimeout,
         signal,
       );
-      if (feedback) throw new Error(`Result rejected: ${feedback}`);
+      if (feedback) throw rejectedDelivery(`Result rejected: ${feedback}`, output);
     }
     signal?.throwIfAborted();
     const text = typeof output === 'string' ? output : JSON.stringify(output);
@@ -182,6 +201,19 @@ export async function runAgent(
     description:
       'Submit the verified final result, matching this schema. For data already in JavaScript, prefer finish_from_js to avoid rewriting it. This ends the task.',
     parameters: resultParameters,
+    // Argument validation failures bypass afterToolCall in Pi's loop.
+    prepareArguments: (args) => {
+      try {
+        return validateToolArguments(finish, {
+          type: 'toolCall',
+          id: 'finish-validation',
+          name: 'finish',
+          arguments: args as ToolCall['arguments'],
+        });
+      } catch (error) {
+        throw rejectedDelivery(error instanceof Error ? error.message : String(error), args);
+      }
+    },
     executionMode: 'sequential',
     execute: async (_id, params: { result: unknown }, signal) =>
       acceptResult(params.result, signal),

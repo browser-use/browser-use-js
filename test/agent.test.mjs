@@ -1053,3 +1053,93 @@ test('cancellation after accepted delivery preserves its value as partial', asyn
     await s.close();
   }
 });
+
+test('misnested finish gets its schema and rejected arguments back without replaying work', async () => {
+  const schema = Type.Object({ answer: Type.String(), request: Type.String() });
+  const rejected = { result: { answer: 'verified' }, request: 'fixture request' };
+  let receivedFeedback = '';
+  const s = await session([
+    call('javascript', { code: 'globalThis.deliveryWork = (globalThis.deliveryWork || 0) + 1' }),
+    call('finish', rejected),
+    (context) => {
+      const feedback = context.messages.at(-1);
+      assert.equal(feedback.isError, true);
+      const text = feedback.content
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text)
+        .join('\n');
+      receivedFeedback = text;
+
+      return call('finish_from_js', {
+        expression:
+          "({answer: 'verified', request: 'fixture request', ...(deliveryWork !== 1 ? {unexpectedReplay: true} : {})})",
+      });
+    },
+  ]);
+  try {
+    const result = await s.agent.run('Deliver verified fixture', { schema, maxSteps: 5 });
+    assert.ok(
+      receivedFeedback.includes(JSON.stringify(schema)),
+      'original result schema must reach same agent',
+    );
+    assert.ok(
+      receivedFeedback.includes(JSON.stringify(rejected)),
+      'rejected arguments must be retained',
+    );
+    assert.match(receivedFeedback, /inside.*result/i);
+    assert.match(receivedFeedback, /request/);
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(result.output, { answer: 'verified', request: 'fixture request' });
+    assert.equal(result.steps, 3);
+    assert.equal(s.faux.state.callCount, 3);
+  } finally {
+    await s.close();
+  }
+});
+
+test('finish feedback preserves existing argument coercion', async () => {
+  const s = await session([call('finish', { result: { count: '2' } })], {
+    browser: { kind: 'pending' },
+  });
+  try {
+    const result = await s.agent.run('Count', { schema: Type.Object({ count: Type.Number() }) });
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(result.output, { count: 2 });
+    assert.equal(s.faux.state.callCount, 1);
+  } finally {
+    await s.close();
+  }
+});
+
+test('non-JSON rejected values cannot erase delivery repair feedback', async () => {
+  let calls = 0;
+  const s = await session(
+    [
+      call('finish', { result: { answer: 'first' } }),
+      (context) => {
+        const text = JSON.stringify(context.messages.at(-1));
+        assert.match(text, /Original result schema/);
+        assert.match(text, /Non-JSON value/);
+        assert.match(text, /fixture validation rejection/);
+        return call('finish', { result: { answer: 'corrected' } });
+      },
+    ],
+    {
+      browser: { kind: 'pending' },
+      validateResult: (output) => {
+        if (++calls === 1) {
+          output.circular = output;
+          return 'fixture validation rejection';
+        }
+      },
+    },
+  );
+  try {
+    const result = await s.agent.run('Deliver', { schema: Type.Object({ answer: Type.String() }) });
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(result.output, { answer: 'corrected' });
+    assert.equal(calls, 2);
+  } finally {
+    await s.close();
+  }
+});
